@@ -56,7 +56,7 @@ export const extractStructuredData = async (
   useFastModel: boolean = false
 ): Promise<ExtractedItem[]> => {
   const ai = getAiClient();
-  const model = useFastModel ? "gemini-2.5-flash-lite" : "gemini-2.5-flash";
+  const baseModel = useFastModel ? "gemini-2.5-flash-lite" : "gemini-2.5-flash";
 
   // Case 1: Multiple Files (Comparison Mode)
   // We prioritize context over chunking here to allow the AI to "see" File A and File B together.
@@ -64,10 +64,7 @@ export const extractStructuredData = async (
     console.log(`Processing ${files.length} files in Comparison Mode...`);
     onProgress?.(20);
     // Send all files in one request. 
-    // Note: If files are extremely huge (e.g. 2x 500 page PDFs), this might hit payload limits.
-    // But for "finding & comparing", splitting contexts usually breaks the logic.
-    // We rely on Gemini 2.5 Flash's 1M context window.
-    return await callGeminiExtractWithRetry(ai, model, prompt, rawText, files);
+    return await callGeminiExtractWithRetry(ai, baseModel, prompt, rawText, files);
   }
 
   // Case 2: Single PDF (Extraction Mode) - Use chunking for massive files
@@ -104,9 +101,11 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
+          // STRICT THROTTLING: Increased from 10s to 15s (Max 4 requests per minute)
+          // This ensures we stay comfortably under the 15 RPM limit even with network variance.
           if (i > 0) {
-            console.log("Throttling request for 10s...");
-            await delay(10000); 
+            console.log("Throttling request for 15s to ensure quota safety...");
+            await delay(15000); 
           }
 
           // Construct temporary file object for this chunk
@@ -116,7 +115,7 @@ export const extractStructuredData = async (
              name: `${singleFile.name}_chunk_${i}`
           };
 
-          const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, [chunkFile]);
+          const chunkResponse = await callGeminiExtractWithRetry(ai, baseModel, prompt, rawText, [chunkFile]);
           aggregatedData = [...aggregatedData, ...chunkResponse];
           
           const percentage = Math.round(5 + ((i + 1) / pageChunks.length) * 90);
@@ -138,8 +137,8 @@ export const extractStructuredData = async (
       let aggregatedData: ExtractedItem[] = [];
       
       for (let i = 0; i < chunks.length; i++) {
-        if (i > 0) await delay(10000);
-        const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], []);
+        if (i > 0) await delay(15000); // 15s Delay
+        const chunkResponse = await callGeminiExtractWithRetry(ai, baseModel, prompt, chunks[i], []);
         aggregatedData = [...aggregatedData, ...chunkResponse];
         const percentage = Math.round(5 + ((i + 1) / chunks.length) * 90);
         onProgress?.(percentage);
@@ -149,42 +148,55 @@ export const extractStructuredData = async (
 
   // Case 4: Standard Execution (Single small file or small text)
   onProgress?.(10);
-  const result = await callGeminiExtractWithRetry(ai, model, prompt, rawText, files);
+  const result = await callGeminiExtractWithRetry(ai, baseModel, prompt, rawText, files);
   onProgress?.(100);
   return result;
 };
 
 const callGeminiExtractWithRetry = async (
   ai: GoogleGenAI, 
-  model: string, 
+  initialModel: string, 
   prompt: string, 
   rawText: string, 
   files: FileData[],
   retries = 20 
 ): Promise<ExtractedItem[]> => {
+  let currentModel = initialModel;
+
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      return await callGeminiExtract(ai, model, prompt, rawText, files);
+      return await callGeminiExtract(ai, currentModel, prompt, rawText, files);
     } catch (e: any) {
-      console.error(`Attempt ${attempt} failed:`, e);
+      const msg = (e.message || e.toString()).toLowerCase();
+      console.warn(`Attempt ${attempt} failed [${currentModel}]:`, msg);
+
       if (attempt === retries) throw e; 
       
-      const msg = (e.message || e.toString()).toLowerCase();
-
+      // Handle 429 / Quota specifically with AGGRESSIVE BACKOFF
       if (msg.includes('429') || msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded')) {
-         let waitTime = 30000; 
-         if (attempt === 2) waitTime = 60000;
-         if (attempt >= 3) waitTime = 90000;
-         console.log(`Quota limit hit (Attempt ${attempt}). Pausing for ${waitTime/1000}s...`);
+         // Quota window is usually 60 seconds. We wait 70s+ to be absolutely sure.
+         // e.g. 70s, 75s, 80s...
+         const waitTime = 70000 + (attempt * 5000); 
+         
+         console.log(`Quota 429 Hit. Cooling down for ${waitTime/1000}s...`);
+
+         // FALLBACK STRATEGY: 
+         // If standard Flash fails, try Flash-Lite on next attempt.
+         if (currentModel === 'gemini-2.5-flash') {
+             console.log("Switching to gemini-2.5-flash-lite for improved availability...");
+             currentModel = 'gemini-2.5-flash-lite';
+         }
+
          await delay(waitTime);
          continue;
       }
 
       if (msg.includes('500') || msg.includes('503') || msg.includes('xhr') || msg.includes('fetch')) {
-         await delay(attempt * 3000);
+         console.log(`Server/Network error. Retrying in ${attempt * 5}s...`);
+         await delay(attempt * 5000);
       } else {
          if (msg.includes('safety') || msg.includes('blocked')) throw e;
-         if (attempt < 3) await delay(2000); else throw e; 
+         if (attempt < 3) await delay(3000); else throw e; 
       }
     }
   }
@@ -295,7 +307,8 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
     required: ["summary", "sentiment", "keyEntities", "suggestedActions", "heuristicAnalysis"]
   };
 
-  await delay(2000);
+  // Ensure significant gap between extraction and analysis
+  await delay(5000);
 
   // Attempt 1: Gemini 3 Pro
   try {
@@ -316,9 +329,11 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
 
   } catch (e: any) {
     const msg = (e.message || e.toString()).toLowerCase();
+    console.warn("Analysis Pro attempt failed:", msg);
     
     if (msg.includes('429')) {
-        await delay(15000);
+        console.log("Analysis quota hit. Waiting 65s...");
+        await delay(65000); // 65s wait for Analysis step
     } else {
         await delay(2000);
     }
@@ -340,7 +355,7 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
         } catch (flashError: any) {
              const flashMsg = (flashError.message || '').toLowerCase();
              if (flashMsg.includes('429')) {
-                 await delay(30000); 
+                 await delay(70000); 
              } else {
                  await delay(5000);
              }

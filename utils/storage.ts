@@ -1,9 +1,11 @@
-import { ExportFormat } from "../types";
+import { ExportFormat, ExtractedItem, AnalysisResult } from "../types";
 
 const KEYS = {
   INSTRUCTION: 'dataxtract_instruction',
   HISTORY: 'dataxtract_history',
-  EXPORT_FORMAT: 'dataxtract_export_format'
+  EXPORT_FORMAT: 'dataxtract_export_format',
+  CACHED_DATA: 'dataxtract_cached_data',
+  CACHED_ANALYSIS: 'dataxtract_cached_analysis'
 };
 
 export const getStoredInstruction = (): string => {
@@ -43,4 +45,31 @@ export const getStoredExportFormat = (): ExportFormat => {
 export const setStoredExportFormat = (format: ExportFormat) => {
   if (typeof window === 'undefined') return;
   localStorage.setItem(KEYS.EXPORT_FORMAT, format);
+};
+
+// Persistence for Offline Capability
+export const saveExtractionSession = (data: ExtractedItem[], analysis: AnalysisResult | null) => {
+  if (typeof window === 'undefined') return;
+  try {
+    localStorage.setItem(KEYS.CACHED_DATA, JSON.stringify(data));
+    if (analysis) {
+      localStorage.setItem(KEYS.CACHED_ANALYSIS, JSON.stringify(analysis));
+    }
+  } catch (e) {
+    console.warn("Storage full, could not save session");
+  }
+};
+
+export const loadExtractionSession = (): { data: ExtractedItem[], analysis: AnalysisResult | null } => {
+  if (typeof window === 'undefined') return { data: [], analysis: null };
+  try {
+    const d = localStorage.getItem(KEYS.CACHED_DATA);
+    const a = localStorage.getItem(KEYS.CACHED_ANALYSIS);
+    return {
+      data: d ? JSON.parse(d) : [],
+      analysis: a ? JSON.parse(a) : null
+    };
+  } catch {
+    return { data: [], analysis: null };
+  }
 };

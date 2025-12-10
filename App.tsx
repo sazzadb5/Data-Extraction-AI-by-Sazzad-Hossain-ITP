@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Zap, Cpu, AlertCircle, Brain, Layers } from 'lucide-react';
+import { Database, Zap, Cpu, AlertCircle, Brain, Layers, Wifi, WifiOff } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { ResultsView } from './components/ResultsView';
 import { extractStructuredData, analyzeExtractedData } from './services/gemini';
@@ -10,13 +10,14 @@ import {
   getInstructionHistory, 
   addToInstructionHistory,
   getStoredExportFormat,
-  setStoredExportFormat 
+  setStoredExportFormat,
+  saveExtractionSession,
+  loadExtractionSession
 } from './utils/storage';
 
 const App: React.FC = () => {
   // Initialize state from localStorage
   const [rawText, setRawText] = useState("");
-  // CHANGED: Single fileData -> Array of files
   const [files, setFiles] = useState<FileData[]>([]);
   
   const [instruction, setInstructionState] = useState(getStoredInstruction());
@@ -25,19 +26,36 @@ const App: React.FC = () => {
   
   const [extractedData, setExtractedData] = useState<ExtractedItem[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
+  const [isOnline, setIsOnline] = useState(navigator.onLine);
   
   // Model preference state
   const [useFastModel, setUseFastModel] = useState(false);
   
   const [status, setStatus] = useState<ProcessingStatus>({ isProcessing: false, step: 'idle', progress: 0 });
 
-  // Load history and format on mount
+  // Load history, format, and previous session on mount
   useEffect(() => {
     setHistory(getInstructionHistory());
     setPreferredFormat(getStoredExportFormat());
+    
+    // Load last session for offline viewing
+    const session = loadExtractionSession();
+    if (session.data.length > 0) {
+      setExtractedData(session.data);
+      setAnalysis(session.analysis);
+    }
+
+    // Network listeners
+    const handleOnline = () => setIsOnline(true);
+    const handleOffline = () => setIsOnline(false);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
   }, []);
 
-  // Wrapper to update instruction state and storage
   const setInstruction = (newInstruction: string) => {
     setInstructionState(newInstruction);
     setStoredInstruction(newInstruction);
@@ -50,7 +68,9 @@ const App: React.FC = () => {
 
   const getFriendlyErrorMessage = (error: any): string => {
     const msg = (error.message || error.toString()).toLowerCase();
-    
+    if (!navigator.onLine) {
+      return "You are offline. Please connect to the internet to perform new extractions.";
+    }
     if (msg.includes('401') || msg.includes('api key')) {
       return "Authentication failed. Please check if your API Key is valid and set correctly.";
     }
@@ -69,11 +89,14 @@ const App: React.FC = () => {
     if (msg.includes('fetch') || msg.includes('network')) {
       return "Network error. Please check your internet connection.";
     }
-    
     return error.message || "An unexpected error occurred. Please try again.";
   };
 
   const validateInput = (): boolean => {
+    if (!isOnline) {
+      setStatus({ isProcessing: false, step: 'error', message: "Offline Mode: AI extraction requires an internet connection." });
+      return false;
+    }
     if (!instruction.trim()) {
       setStatus({ isProcessing: false, step: 'error', message: "Please provide an extraction/comparison goal." });
       return false;
@@ -95,7 +118,6 @@ const App: React.FC = () => {
       return;
     }
 
-    // Save to history start
     const newHistory = addToInstructionHistory(instruction);
     setHistory(newHistory);
 
@@ -104,23 +126,24 @@ const App: React.FC = () => {
     setAnalysis(null);
 
     try {
-      // Step 1: Extract (supports multi-file)
       const data = await extractStructuredData(
         instruction, 
         rawText, 
-        files, // Pass array
+        files,
         (progress) => setStatus(prev => ({ ...prev, progress, message: `Processing data (${progress}%)...` })),
         useFastModel
       );
       
       setExtractedData(data);
+      // Autosave intermediate result
+      saveExtractionSession(data, null);
 
       if (data.length > 0) {
         setStatus({ isProcessing: true, step: 'analyzing', message: 'Deep thinking analysis in progress...', progress: 100 });
-        
-        // Step 2: Analyze (Uses Thinking Mode / Gemini 3 Pro)
         const analysisResult = await analyzeExtractedData(data);
         setAnalysis(analysisResult);
+        // Autosave final result
+        saveExtractionSession(data, analysisResult);
       } else {
         setStatus({ isProcessing: false, step: 'error', message: "No relevant data found matching your criteria.", progress: 0 });
         return;
@@ -136,15 +159,15 @@ const App: React.FC = () => {
   };
 
   const handleReAnalyze = async () => {
-    if (extractedData.length === 0) return;
+    if (extractedData.length === 0 || !isOnline) return;
 
-    // Reuse the 'analyzing' step UI, but keep extractedData intact
     setStatus({ isProcessing: true, step: 'analyzing', message: 'Re-analyzing extracted data...', progress: 100 });
     setAnalysis(null);
 
     try {
         const analysisResult = await analyzeExtractedData(extractedData);
         setAnalysis(analysisResult);
+        saveExtractionSession(extractedData, analysisResult);
         setStatus({ isProcessing: false, step: 'complete', progress: 100 });
     } catch (error: any) {
         console.error("Re-analysis Error:", error);
@@ -168,11 +191,26 @@ const App: React.FC = () => {
               <p className="text-xs text-slate-400">High-Volume PDF & Data Engine</p>
             </div>
           </div>
-          <div className="flex items-center gap-4 text-sm text-slate-400 hidden sm:flex">
-             {files.length > 1 && <span className="flex items-center gap-1 text-green-400 animate-pulse"><Layers size={14} /> Compare Mode</span>}
-             <span className="flex items-center gap-1"><Zap size={14} className="text-yellow-400" /> Flash Lite</span>
-             <span className="flex items-center gap-1"><Cpu size={14} className="text-blue-400" /> Flash 2.5</span>
-             <span className="flex items-center gap-1"><Brain size={14} className="text-purple-400" /> Pro 3 Thinking</span>
+          <div className="flex items-center gap-4 text-sm font-medium">
+             {/* Offline Indicator */}
+             {!isOnline ? (
+               <div className="flex items-center gap-2 px-3 py-1 bg-red-500/10 text-red-400 rounded-full border border-red-500/20 animate-pulse">
+                 <WifiOff size={14} />
+                 <span>Offline Mode</span>
+               </div>
+             ) : (
+               <div className="hidden sm:flex items-center gap-2 text-slate-500">
+                 <Wifi size={14} className="text-green-500" />
+                 <span className="text-xs">Online</span>
+               </div>
+             )}
+
+             <div className="hidden sm:flex items-center gap-4 text-slate-400 border-l border-slate-700 pl-4">
+                {files.length > 1 && <span className="flex items-center gap-1 text-green-400 animate-pulse"><Layers size={14} /> Compare Mode</span>}
+                <span className="flex items-center gap-1"><Zap size={14} className="text-yellow-400" /> Flash Lite</span>
+                <span className="flex items-center gap-1"><Cpu size={14} className="text-blue-400" /> Flash 2.5</span>
+                <span className="flex items-center gap-1"><Brain size={14} className="text-purple-400" /> Pro 3</span>
+             </div>
           </div>
         </div>
       </header>
@@ -181,6 +219,17 @@ const App: React.FC = () => {
       <main className="flex-grow p-6 md:p-12">
         <div className="max-w-7xl mx-auto space-y-12">
           
+          {/* Offline Warning Banner */}
+          {!isOnline && (
+            <div className="bg-slate-800 border-l-4 border-yellow-500 p-4 rounded shadow-lg flex justify-between items-center">
+               <div>
+                  <h3 className="text-yellow-400 font-semibold">Connection Lost</h3>
+                  <p className="text-slate-400 text-sm">You can view and export previously extracted data, but AI features are disabled.</p>
+               </div>
+               <WifiOff className="text-slate-600 h-8 w-8" />
+            </div>
+          )}
+
           {/* Hero Text */}
           {extractedData.length === 0 && !status.isProcessing && status.step !== 'error' && (
             <div className="text-center space-y-4 py-8">
@@ -245,14 +294,17 @@ const App: React.FC = () => {
           )}
 
           {/* Results Section */}
-          {!status.isProcessing && extractedData.length > 0 && (
-            <ResultsView 
-              data={extractedData} 
-              analysis={analysis} 
-              preferredFormat={preferredFormat}
-              onFormatSelected={handleFormatChange}
-              onReAnalyze={handleReAnalyze}
-            />
+          {(extractedData.length > 0) && (
+            <div className={!isOnline ? "opacity-90 grayscale-[0.2]" : ""}>
+               {/* Show stale data if offline */}
+               <ResultsView 
+                 data={extractedData} 
+                 analysis={analysis} 
+                 preferredFormat={preferredFormat}
+                 onFormatSelected={handleFormatChange}
+                 onReAnalyze={handleReAnalyze}
+               />
+            </div>
           )}
 
         </div>
