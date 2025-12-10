@@ -56,8 +56,6 @@ export const extractStructuredData = async (
   useFastModel: boolean = false
 ): Promise<ExtractedItem[]> => {
   const ai = getAiClient();
-  // Feature: Fast AI responses using gemini-2.5-flash-lite
-  // Standard: gemini-2.5-flash (Balanced)
   const model = useFastModel ? "gemini-2.5-flash-lite" : "gemini-2.5-flash";
 
   // 1. Handle PDF Splitting
@@ -74,8 +72,9 @@ export const extractStructuredData = async (
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
       
-      // Conservative chunking: 2 pages per request to minimize token load per call
-      const MAX_PAGES_PER_CHUNK = 2; 
+      // EXTREMELY CONSERVATIVE CHUNKING: 
+      // 1 page per request to ensure lowest possible Token Per Minute (TPM) usage.
+      const MAX_PAGES_PER_CHUNK = 1; 
 
       if (totalPages > MAX_PAGES_PER_CHUNK) {
         console.log(`Large PDF detected (${totalPages} pages). Splitting into ${MAX_PAGES_PER_CHUNK} page chunks...`);
@@ -95,13 +94,12 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          // SMART THROTTLING: 
-          // Gemini Free Tier is ~15 RPM (Requests Per Minute). 
-          // 60s / 15 = 4s per request.
-          // We set delay to 5.5s to be safe and allow some buffer.
+          // STRICT RATE LIMITING:
+          // Gemini Free Tier is ~15 RPM. 
+          // We aim for 6 RPM (1 request every 10s) to be absolutely safe against 429s.
           if (i > 0) {
-            console.log("Throttling request for 5.5s to manage RPM...");
-            await delay(5500);
+            console.log("Throttling request for 10s to manage RPM...");
+            await delay(10000); 
           }
 
           const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, {
@@ -112,7 +110,7 @@ export const extractStructuredData = async (
           
           aggregatedData = [...aggregatedData, ...chunkResponse];
           
-          // Update progress: Map 5% -> 95%
+          // Update progress
           const percentage = Math.round(5 + ((i + 1) / pageChunks.length) * 90);
           onProgress?.(percentage);
         }
@@ -125,7 +123,8 @@ export const extractStructuredData = async (
   }
 
   // 2. Handle Large Text Splitting
-  const MAX_TEXT_LENGTH = 15000; 
+  // 12k chars is roughly 3k tokens. Safe for TPM limits.
+  const MAX_TEXT_LENGTH = 12000; 
 
   if (!fileData && rawText.length > MAX_TEXT_LENGTH) {
       console.log(`Large Text input detected (${rawText.length} chars). Splitting...`);
@@ -137,7 +136,7 @@ export const extractStructuredData = async (
         console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
         
         // Throttling for text chunks
-        if (i > 0) await delay(5500);
+        if (i > 0) await delay(10000);
         
         const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], null);
         aggregatedData = [...aggregatedData, ...chunkResponse];
@@ -156,14 +155,14 @@ export const extractStructuredData = async (
   return result;
 };
 
-// Wrapped call with Bulletproof Retry Logic
+// Wrapped call with Infinite Patience Retry Logic
 const callGeminiExtractWithRetry = async (
   ai: GoogleGenAI, 
   model: string, 
   prompt: string, 
   rawText: string, 
   fileData?: FileData | null,
-  retries = 20 // Huge retry limit to effectively wait out any quota pause
+  retries = 20 
 ): Promise<ExtractedItem[]> => {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -174,28 +173,33 @@ const callGeminiExtractWithRetry = async (
       
       const msg = (e.message || e.toString()).toLowerCase();
 
-      // Handle 429 / Quota specifically with EXPONENTIAL + FIXED backoff
+      // Handle 429 / Quota specifically
       if (msg.includes('429') || msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded')) {
-         // Strategy: 
-         // Attempts 1-3: Quick backoff (5s, 10s, 15s) for transient spikes
-         // Attempts 4+: Long backoff (60s) for "bucket empty" scenarios
-         let waitTime = 5000 * attempt;
-         if (attempt >= 3) waitTime = 60000; // Wait a full minute if persistent
+         // RECOVERY STRATEGY:
+         // If we hit 429, the quota bucket for the minute is likely exhausted.
+         // We must wait significantly to let it refill.
+         // Attempt 1: 30s
+         // Attempt 2: 60s
+         // Attempt 3+: 90s
          
-         console.log(`Quota limit hit (Attempt ${attempt}). Pausing for ${waitTime/1000}s...`);
+         let waitTime = 30000; 
+         if (attempt === 2) waitTime = 60000;
+         if (attempt >= 3) waitTime = 90000;
+         
+         console.log(`Quota limit hit (Attempt ${attempt}). Pausing for ${waitTime/1000}s to refill bucket...`);
          await delay(waitTime);
          continue;
       }
 
-      // If error is 500/503 or network related, wait and retry
+      // If error is 500/503 or network related
       if (msg.includes('500') || msg.includes('503') || msg.includes('xhr') || msg.includes('fetch')) {
          console.log(`Server error. Retrying in ${attempt * 3000} ms...`);
          await delay(attempt * 3000);
       } else {
-         // Some other error. If it looks like a safety block, don't retry.
+         // Some other error. If safety blocked, abort.
          if (msg.includes('safety') || msg.includes('blocked')) throw e;
          
-         // Otherwise try a few times
+         // Transient errors
          if (attempt < 3) {
              await delay(2000);
          } else {
@@ -270,7 +274,6 @@ const callGeminiExtract = async (
 
     return [];
   } catch (e) {
-    // Fallback regex
     const match = text.match(/\[.*\]/s);
     if (match) {
         try {
@@ -284,15 +287,12 @@ const callGeminiExtract = async (
 
 /**
  * Analyzes the extracted data.
- * Includes FALLBACK mechanism: 
- * Tries 'gemini-3-pro-preview' (smartest) -> Falls back to 'gemini-2.5-flash' (higher quota) on 429.
+ * Fallback: gemini-3-pro-preview -> gemini-2.5-flash
  */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
-  // Limit context for analysis
-  const dataStr = JSON.stringify(data.slice(0, 500)); 
+  const dataStr = JSON.stringify(data.slice(0, 300)); 
   
-  // Common Schema for both models
   const schema = {
     type: Type.OBJECT,
     properties: {
@@ -309,14 +309,17 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
     required: ["summary", "sentiment", "keyEntities", "suggestedActions", "heuristicAnalysis"]
   };
 
-  // Attempt 1: Gemini 3 Pro (Thinking Mode)
+  // Wait a bit before analysis to let extraction quota cool down
+  await delay(2000);
+
+  // Attempt 1: Gemini 3 Pro
   try {
     console.log("Attempting analysis with Gemini 3 Pro...");
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
       contents: `Analyze this dataset: ${dataStr}`,
       config: {
-        thinkingConfig: { thinkingBudget: 8192 }, // Reduced budget to be safer
+        thinkingConfig: { thinkingBudget: 4096 }, 
         responseMimeType: "application/json",
         responseSchema: schema
       }
@@ -331,14 +334,17 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
     const msg = (e.message || e.toString()).toLowerCase();
     console.warn("Analysis with Pro model failed:", msg);
 
-    // If it's a quota issue or any server error, fallback to Flash immediately
-    // Wait briefly to clear any rapid-fire checks
-    await delay(2000);
+    // If quota hit, wait significantly before fallback
+    if (msg.includes('429')) {
+        console.log("Pro model quota hit. Waiting 15s before fallback...");
+        await delay(15000);
+    } else {
+        await delay(2000);
+    }
 
     console.log("Falling back to Gemini 2.5 Flash for analysis...");
     
-    // Attempt 2: Gemini 2.5 Flash (No Thinking, High Quota)
-    // We try this up to 3 times
+    // Attempt 2: Gemini 2.5 Flash
     for (let i = 0; i < 3; i++) {
         try {
             const response = await ai.models.generateContent({
@@ -352,19 +358,23 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
             if (response.text) {
                 return JSON.parse(response.text) as AnalysisResult;
             }
-        } catch (flashError) {
+        } catch (flashError: any) {
              console.error(`Flash Analysis attempt ${i+1} failed`, flashError);
-             await delay(5000); // Wait 5s before retry
+             const flashMsg = (flashError.message || '').toLowerCase();
+             if (flashMsg.includes('429')) {
+                 await delay(30000); // Heavy wait if even flash fails
+             } else {
+                 await delay(5000);
+             }
         }
     }
   }
 
-  // If both failed, return a dummy result to prevent app crash
   return {
-      summary: "Analysis failed due to high API traffic. Please try regenerating analysis later.",
+      summary: "Analysis failed due to persistent high API traffic. Data extraction is complete and available below.",
       sentiment: "neutral",
       keyEntities: [],
-      suggestedActions: ["Try manual analysis", "Export data to Excel"],
-      heuristicAnalysis: ["Data extraction was successful, but AI analysis could not complete."]
+      suggestedActions: ["Export data to Excel for manual analysis"],
+      heuristicAnalysis: ["AI Analysis service temporarily unavailable."]
   };
 };
