@@ -95,8 +95,8 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          // Add a delay between chunks to avoid rate limiting
-          if (i > 0) await delay(1500);
+          // Increased delay to prevent 429 Rate Limit errors
+          if (i > 0) await delay(2000);
 
           const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, {
             ...fileData,
@@ -130,8 +130,8 @@ export const extractStructuredData = async (
       
       for (let i = 0; i < chunks.length; i++) {
         console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
-        // Add delay between chunks
-        if (i > 0) await delay(1500);
+        // Increased delay to prevent 429 Rate Limit errors
+        if (i > 0) await delay(2000);
         
         const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], null);
         aggregatedData = [...aggregatedData, ...chunkResponse];
@@ -157,7 +157,7 @@ const callGeminiExtractWithRetry = async (
   prompt: string, 
   rawText: string, 
   fileData?: FileData | null,
-  retries = 3
+  retries = 5 // Increased retries to handle rate limits better
 ): Promise<ExtractedItem[]> => {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -166,12 +166,22 @@ const callGeminiExtractWithRetry = async (
       console.error(`Attempt ${attempt} failed:`, e);
       if (attempt === retries) throw e; // Throw on final attempt
       
+      const msg = e.message?.toLowerCase() || '';
+
+      // Handle 429 / Quota specifically with significant backoff
+      if (msg.includes('429') || msg.includes('quota') || msg.includes('limit')) {
+         const waitTime = attempt * 5000 + 2000; // 7s, 12s, 17s...
+         console.log(`Quota limit hit (429). Pausing for ${waitTime}ms before retry...`);
+         await delay(waitTime);
+         continue;
+      }
+
       // If error is 500/503 or network related, wait and retry
-      if (e.message?.includes('500') || e.message?.includes('503') || e.message?.includes('xhr') || e.message?.includes('fetch')) {
+      if (msg.includes('500') || msg.includes('503') || msg.includes('xhr') || msg.includes('fetch')) {
          console.log(`Retrying in ${attempt * 2000} ms...`);
          await delay(attempt * 2000);
       } else {
-        throw e; // Don't retry for other errors (like 400 Bad Request if validation fails, unless it's the token one which we can't really fix by retrying exactly same payload, but here we assume chunking handled that)
+        throw e; // Don't retry for other errors (like 400 Bad Request)
       }
     }
   }
@@ -268,33 +278,53 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
   const ai = getAiClient();
   // Limit context for analysis to avoid huge payloads
   const dataStr = JSON.stringify(data.slice(0, 500)); 
+  let retries = 3;
 
-  const response = await ai.models.generateContent({
-    model: "gemini-3-pro-preview", // Use Pro for complex analysis
-    contents: `Analyze this dataset: ${dataStr}`,
-    config: {
-      thinkingConfig: { thinkingBudget: 32768 }, // Enable Thinking Mode (Max budget)
-      responseMimeType: "application/json",
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          summary: { type: Type.STRING },
-          sentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative'] },
-          keyEntities: { type: Type.ARRAY, items: { type: Type.STRING } },
-          suggestedActions: { type: Type.ARRAY, items: { type: Type.STRING } },
-          heuristicAnalysis: { 
-            type: Type.ARRAY, 
-            items: { type: Type.STRING },
-            description: "Heuristic observations about data quality, patterns, anomalies, or missing information."
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      const response = await ai.models.generateContent({
+        model: "gemini-3-pro-preview", // Use Pro for complex analysis
+        contents: `Analyze this dataset: ${dataStr}`,
+        config: {
+          thinkingConfig: { thinkingBudget: 32768 }, // Enable Thinking Mode (Max budget)
+          responseMimeType: "application/json",
+          responseSchema: {
+            type: Type.OBJECT,
+            properties: {
+              summary: { type: Type.STRING },
+              sentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative'] },
+              keyEntities: { type: Type.ARRAY, items: { type: Type.STRING } },
+              suggestedActions: { type: Type.ARRAY, items: { type: Type.STRING } },
+              heuristicAnalysis: { 
+                type: Type.ARRAY, 
+                items: { type: Type.STRING },
+                description: "Heuristic observations about data quality, patterns, anomalies, or missing information."
+              }
+            },
+            required: ["summary", "sentiment", "keyEntities", "suggestedActions", "heuristicAnalysis"]
           }
-        },
-        required: ["summary", "sentiment", "keyEntities", "suggestedActions", "heuristicAnalysis"]
-      }
+        }
+      });
+
+      const text = response.text;
+      if (!text) throw new Error("No analysis returned");
+      return JSON.parse(text) as AnalysisResult;
+
+    } catch (e: any) {
+       console.error(`Analysis attempt ${attempt} failed:`, e);
+       if (attempt === retries) throw e;
+       
+       const msg = e.message?.toLowerCase() || '';
+       if (msg.includes('429') || msg.includes('quota') || msg.includes('limit')) {
+         const waitTime = attempt * 5000 + 3000;
+         console.log(`Analysis Quota hit. Waiting ${waitTime}ms...`);
+         await delay(waitTime);
+       } else if (msg.includes('500') || msg.includes('503')) {
+         await delay(2000);
+       } else {
+         throw e;
+       }
     }
-  });
-
-  const text = response.text;
-  if (!text) throw new Error("No analysis returned");
-
-  return JSON.parse(text) as AnalysisResult;
+  }
+  throw new Error("Analysis failed after retries");
 };
