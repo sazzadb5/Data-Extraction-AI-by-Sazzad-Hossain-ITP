@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Zap, Cpu, AlertCircle, Brain } from 'lucide-react';
+import { Database, Zap, Cpu, AlertCircle, Brain, Layers } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { ResultsView } from './components/ResultsView';
 import { extractStructuredData, analyzeExtractedData } from './services/gemini';
@@ -16,7 +16,9 @@ import {
 const App: React.FC = () => {
   // Initialize state from localStorage
   const [rawText, setRawText] = useState("");
-  const [fileData, setFileData] = useState<FileData | null>(null);
+  // CHANGED: Single fileData -> Array of files
+  const [files, setFiles] = useState<FileData[]>([]);
+  
   const [instruction, setInstructionState] = useState(getStoredInstruction());
   const [history, setHistory] = useState<string[]>([]);
   const [preferredFormat, setPreferredFormat] = useState<ExportFormat>(ExportFormat.CSV);
@@ -73,11 +75,11 @@ const App: React.FC = () => {
 
   const validateInput = (): boolean => {
     if (!instruction.trim()) {
-      setStatus({ isProcessing: false, step: 'error', message: "Please provide an extraction goal or description of what you want to find." });
+      setStatus({ isProcessing: false, step: 'error', message: "Please provide an extraction/comparison goal." });
       return false;
     }
-    if (!rawText.trim() && !fileData) {
-      setStatus({ isProcessing: false, step: 'error', message: "Please upload a file or paste text content to process." });
+    if (!rawText.trim() && files.length === 0) {
+      setStatus({ isProcessing: false, step: 'error', message: "Please upload files or paste text content to process." });
       return false;
     }
     return true;
@@ -97,18 +99,18 @@ const App: React.FC = () => {
     const newHistory = addToInstructionHistory(instruction);
     setHistory(newHistory);
 
-    setStatus({ isProcessing: true, step: 'extracting', message: 'Initializing extraction...', progress: 0 });
+    setStatus({ isProcessing: true, step: 'extracting', message: 'Initializing...', progress: 0 });
     setExtractedData([]);
     setAnalysis(null);
 
     try {
-      // Step 1: Extract
+      // Step 1: Extract (supports multi-file)
       const data = await extractStructuredData(
         instruction, 
         rawText, 
-        fileData,
-        (progress) => setStatus(prev => ({ ...prev, progress, message: `Extracting data (${progress}%)...` })),
-        useFastModel // Pass the user preference
+        files, // Pass array
+        (progress) => setStatus(prev => ({ ...prev, progress, message: `Processing data (${progress}%)...` })),
+        useFastModel
       );
       
       setExtractedData(data);
@@ -167,6 +169,7 @@ const App: React.FC = () => {
             </div>
           </div>
           <div className="flex items-center gap-4 text-sm text-slate-400 hidden sm:flex">
+             {files.length > 1 && <span className="flex items-center gap-1 text-green-400 animate-pulse"><Layers size={14} /> Compare Mode</span>}
              <span className="flex items-center gap-1"><Zap size={14} className="text-yellow-400" /> Flash Lite</span>
              <span className="flex items-center gap-1"><Cpu size={14} className="text-blue-400" /> Flash 2.5</span>
              <span className="flex items-center gap-1"><Brain size={14} className="text-purple-400" /> Pro 3 Thinking</span>
@@ -178,14 +181,14 @@ const App: React.FC = () => {
       <main className="flex-grow p-6 md:p-12">
         <div className="max-w-7xl mx-auto space-y-12">
           
-          {/* Hero Text (Only show if no results yet and not error) */}
+          {/* Hero Text */}
           {extractedData.length === 0 && !status.isProcessing && status.step !== 'error' && (
             <div className="text-center space-y-4 py-8">
               <h2 className="text-4xl md:text-5xl font-extrabold text-white">
-                Turn Chaos into <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Structured Data</span>
+                Multi-File <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Comparison & Extraction</span>
               </h2>
               <p className="text-slate-400 max-w-2xl mx-auto text-lg">
-                Upload massive PDFs (5K+ pages), images, or text. Our AI extracts fields into Excel, CSV, or custom reports instantly.
+                Upload massive PDFs (5K+ pages), images, or text. Compare documents against each other or extract structured data instantly.
               </p>
             </div>
           )}
@@ -194,8 +197,8 @@ const App: React.FC = () => {
           <InputSection
             rawText={rawText}
             setRawText={setRawText}
-            fileData={fileData}
-            setFileData={setFileData}
+            files={files}
+            setFiles={setFiles}
             instruction={instruction}
             setInstruction={setInstruction}
             history={history}
@@ -223,7 +226,7 @@ const App: React.FC = () => {
                <p className="text-xs text-slate-500 text-center flex items-center justify-center gap-2">
                  {status.step === 'analyzing' 
                    ? <><Brain size={14} className="text-purple-400 animate-pulse"/> Gemini 3 Pro is thinking...</>
-                   : 'Processing document chunks in parallel...'}
+                   : 'Processing...'}
                </p>
             </div>
           )}
@@ -235,7 +238,7 @@ const App: React.FC = () => {
                 <AlertCircle className="text-red-400 h-6 w-6" />
               </div>
               <div>
-                <h3 className="text-red-400 font-semibold text-lg mb-1">Extraction Failed</h3>
+                <h3 className="text-red-400 font-semibold text-lg mb-1">Processing Failed</h3>
                 <p className="text-red-200/80 text-sm leading-relaxed">{status.message}</p>
               </div>
             </div>

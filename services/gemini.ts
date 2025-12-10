@@ -19,7 +19,7 @@ const chunkArray = (arr: number[], size: number) => {
   return res;
 };
 
-// Helper to chunk string (for massive text inputs)
+// Helper to chunk string
 const chunkString = (str: string, size: number) => {
   const numChunks = Math.ceil(str.length / size);
   const chunks = new Array(numChunks);
@@ -29,7 +29,6 @@ const chunkString = (str: string, size: number) => {
   return chunks;
 };
 
-// Helper to convert base64 to Uint8Array
 const base64ToUint8Array = (base64: string): Uint8Array => {
   const binaryString = atob(base64);
   const len = binaryString.length;
@@ -40,53 +39,64 @@ const base64ToUint8Array = (base64: string): Uint8Array => {
   return bytes;
 };
 
-// Helper for delay
 const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 
 /**
- * Extracts structured data from unstructured text or file inputs (PDF/Images).
- * Uses Gemini 2.5 Flash which has a 1M token context window.
- * Automatically splits inputs to bypass API limits and network payload restrictions.
+ * Extracts structured data.
+ * Supports MULTI-FILE comparison.
+ * Strategy:
+ * 1. Single PDF: Use "Page Chunking" to stay under RPM limits for massive files.
+ * 2. Multiple Files: Load ALL files into context (up to 1M token limit) to allow cross-file comparison.
  */
 export const extractStructuredData = async (
   prompt: string,
   rawText: string,
-  fileData?: FileData | null,
+  files: FileData[] = [],
   onProgress?: (progress: number) => void,
   useFastModel: boolean = false
 ): Promise<ExtractedItem[]> => {
   const ai = getAiClient();
   const model = useFastModel ? "gemini-2.5-flash-lite" : "gemini-2.5-flash";
 
-  // 1. Handle PDF Splitting
-  const isPdf = fileData && (
-    fileData.mimeType === 'application/pdf' || 
-    fileData.name.toLowerCase().endsWith('.pdf')
+  // Case 1: Multiple Files (Comparison Mode)
+  // We prioritize context over chunking here to allow the AI to "see" File A and File B together.
+  if (files.length > 1) {
+    console.log(`Processing ${files.length} files in Comparison Mode...`);
+    onProgress?.(20);
+    // Send all files in one request. 
+    // Note: If files are extremely huge (e.g. 2x 500 page PDFs), this might hit payload limits.
+    // But for "finding & comparing", splitting contexts usually breaks the logic.
+    // We rely on Gemini 2.5 Flash's 1M context window.
+    return await callGeminiExtractWithRetry(ai, model, prompt, rawText, files);
+  }
+
+  // Case 2: Single PDF (Extraction Mode) - Use chunking for massive files
+  const singleFile = files.length === 1 ? files[0] : null;
+  const isPdf = singleFile && (
+    singleFile.mimeType === 'application/pdf' || 
+    singleFile.name.toLowerCase().endsWith('.pdf')
   );
 
-  if (fileData && isPdf) {
+  if (singleFile && isPdf) {
     try {
       console.log("Checking PDF size...");
-      onProgress?.(5); // Started
-      const pdfBytes = base64ToUint8Array(fileData.base64);
+      onProgress?.(5);
+      const pdfBytes = base64ToUint8Array(singleFile.base64);
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
       
-      // EXTREMELY CONSERVATIVE CHUNKING: 
-      // 1 page per request to ensure lowest possible Token Per Minute (TPM) usage.
-      const MAX_PAGES_PER_CHUNK = 1; 
+      const MAX_PAGES_PER_CHUNK = 1; // Strict chunking for single-file massive extraction
 
       if (totalPages > MAX_PAGES_PER_CHUNK) {
-        console.log(`Large PDF detected (${totalPages} pages). Splitting into ${MAX_PAGES_PER_CHUNK} page chunks...`);
+        console.log(`Large PDF detected (${totalPages} pages). Splitting...`);
         const pageIndices = Array.from({ length: totalPages }, (_, i) => i);
         const pageChunks = chunkArray(pageIndices, MAX_PAGES_PER_CHUNK);
         
         let aggregatedData: ExtractedItem[] = [];
 
-        // Process chunks sequentially
         for (let i = 0; i < pageChunks.length; i++) {
           const chunkIndices = pageChunks[i];
-          console.log(`Processing chunk ${i + 1}/${pageChunks.length} (${chunkIndices.length} pages)...`);
+          console.log(`Processing chunk ${i + 1}/${pageChunks.length}...`);
           
           const subDoc = await PDFDocument.create();
           const copiedPages = await subDoc.copyPages(pdfDoc, chunkIndices);
@@ -94,149 +104,129 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          // STRICT RATE LIMITING:
-          // Gemini Free Tier is ~15 RPM. 
-          // We aim for 6 RPM (1 request every 10s) to be absolutely safe against 429s.
           if (i > 0) {
-            console.log("Throttling request for 10s to manage RPM...");
+            console.log("Throttling request for 10s...");
             await delay(10000); 
           }
 
-          const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, {
-            ...fileData,
-            base64: subDocBase64,
-            mimeType: 'application/pdf'
-          });
-          
+          // Construct temporary file object for this chunk
+          const chunkFile: FileData = { 
+             ...singleFile, 
+             base64: subDocBase64,
+             name: `${singleFile.name}_chunk_${i}`
+          };
+
+          const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, [chunkFile]);
           aggregatedData = [...aggregatedData, ...chunkResponse];
           
-          // Update progress
           const percentage = Math.round(5 + ((i + 1) / pageChunks.length) * 90);
           onProgress?.(percentage);
         }
-        
         return aggregatedData;
       }
     } catch (err) {
-      console.warn("PDF pre-processing/splitting failed. Falling back to standard mode.", err);
+      console.warn("PDF splitting failed. Falling back to standard mode.", err);
     }
   }
 
-  // 2. Handle Large Text Splitting
-  // 12k chars is roughly 3k tokens. Safe for TPM limits.
+  // Case 3: Large Text Splitting (Single text stream)
   const MAX_TEXT_LENGTH = 12000; 
-
-  if (!fileData && rawText.length > MAX_TEXT_LENGTH) {
-      console.log(`Large Text input detected (${rawText.length} chars). Splitting...`);
+  if (files.length === 0 && rawText.length > MAX_TEXT_LENGTH) {
+      console.log(`Large Text input detected. Splitting...`);
       onProgress?.(5);
       const chunks = chunkString(rawText, MAX_TEXT_LENGTH);
       let aggregatedData: ExtractedItem[] = [];
       
       for (let i = 0; i < chunks.length; i++) {
-        console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
-        
-        // Throttling for text chunks
         if (i > 0) await delay(10000);
-        
-        const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], null);
+        const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], []);
         aggregatedData = [...aggregatedData, ...chunkResponse];
-
-        // Update progress
         const percentage = Math.round(5 + ((i + 1) / chunks.length) * 90);
         onProgress?.(percentage);
       }
       return aggregatedData;
   }
 
-  // Standard Execution (Images, Small Texts, Small PDFs)
-  onProgress?.(10); // Start
-  const result = await callGeminiExtractWithRetry(ai, model, prompt, rawText, fileData);
-  onProgress?.(100); // Finish
+  // Case 4: Standard Execution (Single small file or small text)
+  onProgress?.(10);
+  const result = await callGeminiExtractWithRetry(ai, model, prompt, rawText, files);
+  onProgress?.(100);
   return result;
 };
 
-// Wrapped call with Infinite Patience Retry Logic
 const callGeminiExtractWithRetry = async (
   ai: GoogleGenAI, 
   model: string, 
   prompt: string, 
   rawText: string, 
-  fileData?: FileData | null,
+  files: FileData[],
   retries = 20 
 ): Promise<ExtractedItem[]> => {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
-      return await callGeminiExtract(ai, model, prompt, rawText, fileData);
+      return await callGeminiExtract(ai, model, prompt, rawText, files);
     } catch (e: any) {
       console.error(`Attempt ${attempt} failed:`, e);
       if (attempt === retries) throw e; 
       
       const msg = (e.message || e.toString()).toLowerCase();
 
-      // Handle 429 / Quota specifically
       if (msg.includes('429') || msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded')) {
-         // RECOVERY STRATEGY:
-         // If we hit 429, the quota bucket for the minute is likely exhausted.
-         // We must wait significantly to let it refill.
-         // Attempt 1: 30s
-         // Attempt 2: 60s
-         // Attempt 3+: 90s
-         
          let waitTime = 30000; 
          if (attempt === 2) waitTime = 60000;
          if (attempt >= 3) waitTime = 90000;
-         
-         console.log(`Quota limit hit (Attempt ${attempt}). Pausing for ${waitTime/1000}s to refill bucket...`);
+         console.log(`Quota limit hit (Attempt ${attempt}). Pausing for ${waitTime/1000}s...`);
          await delay(waitTime);
          continue;
       }
 
-      // If error is 500/503 or network related
       if (msg.includes('500') || msg.includes('503') || msg.includes('xhr') || msg.includes('fetch')) {
-         console.log(`Server error. Retrying in ${attempt * 3000} ms...`);
          await delay(attempt * 3000);
       } else {
-         // Some other error. If safety blocked, abort.
          if (msg.includes('safety') || msg.includes('blocked')) throw e;
-         
-         // Transient errors
-         if (attempt < 3) {
-             await delay(2000);
-         } else {
-            throw e; 
-         }
+         if (attempt < 3) await delay(2000); else throw e; 
       }
     }
   }
   return [];
 };
 
-// Core API Call
 const callGeminiExtract = async (
   ai: GoogleGenAI, 
   model: string, 
   prompt: string, 
   rawText: string, 
-  fileData?: FileData | null
+  files: FileData[]
 ): Promise<ExtractedItem[]> => {
   let userContent: any[] = [];
   
-  if (fileData) {
-    userContent.push({
-      inlineData: {
-        mimeType: fileData.mimeType,
-        data: fileData.base64,
-      },
-    });
-    
-    let textPrompt = `Extract structured data from this document part based on the following goal: "${prompt}". Return a valid JSON Array.`;
-    if (rawText) {
-      textPrompt += `\n\nAdditional Context:\n${rawText}`;
-    }
-    userContent.push({ text: textPrompt });
-  } else {
-    userContent.push({ text: `Extract the following data structures based on this instruction: "${prompt}".\n\nData Source:\n${rawText}` });
+  // Add all files as inline parts
+  files.forEach(file => {
+      userContent.push({
+        inlineData: {
+          mimeType: file.mimeType,
+          data: file.base64,
+        },
+      });
+  });
+  
+  // Construct prompt
+  let textPrompt = `Extract structured data based on the goal: "${prompt}". Return a valid JSON Array.`;
+  
+  if (files.length > 1) {
+      textPrompt = `COMPARE & EXTRACT TASK:
+      1. You are provided with ${files.length} files.
+      2. Goal: "${prompt}"
+      3. Cross-reference data between the files if required by the goal.
+      4. Output only the final matching/extracted data as a JSON Array.
+      5. If finding matches, include details from both files where relevant.`;
   }
+
+  if (rawText) {
+    textPrompt += `\n\nAdditional Context/Instructions:\n${rawText}`;
+  }
+  
+  userContent.push({ text: textPrompt });
 
   const response = await ai.models.generateContent({
     model,
@@ -245,7 +235,7 @@ const callGeminiExtract = async (
       parts: userContent
     },
     config: {
-      systemInstruction: `You are a data extraction engine.
+      systemInstruction: `You are a data extraction and comparison engine.
       CRITICAL: Output ONLY a valid JSON Array of objects.
       - Keys: Use snake_case or camelCase consistently.
       - IDs: Keep as strings.
@@ -285,10 +275,6 @@ const callGeminiExtract = async (
   }
 };
 
-/**
- * Analyzes the extracted data.
- * Fallback: gemini-3-pro-preview -> gemini-2.5-flash
- */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
   const dataStr = JSON.stringify(data.slice(0, 300)); 
@@ -303,21 +289,19 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
       heuristicAnalysis: { 
         type: Type.ARRAY, 
         items: { type: Type.STRING },
-        description: "Observations about data quality, patterns, or anomalies."
+        description: "Observations about data quality, patterns, matches between files, or anomalies."
       }
     },
     required: ["summary", "sentiment", "keyEntities", "suggestedActions", "heuristicAnalysis"]
   };
 
-  // Wait a bit before analysis to let extraction quota cool down
   await delay(2000);
 
   // Attempt 1: Gemini 3 Pro
   try {
-    console.log("Attempting analysis with Gemini 3 Pro...");
     const response = await ai.models.generateContent({
       model: "gemini-3-pro-preview",
-      contents: `Analyze this dataset: ${dataStr}`,
+      contents: `Analyze this extracted/compared dataset: ${dataStr}`,
       config: {
         thinkingConfig: { thinkingBudget: 4096 }, 
         responseMimeType: "application/json",
@@ -332,17 +316,12 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
 
   } catch (e: any) {
     const msg = (e.message || e.toString()).toLowerCase();
-    console.warn("Analysis with Pro model failed:", msg);
-
-    // If quota hit, wait significantly before fallback
+    
     if (msg.includes('429')) {
-        console.log("Pro model quota hit. Waiting 15s before fallback...");
         await delay(15000);
     } else {
         await delay(2000);
     }
-
-    console.log("Falling back to Gemini 2.5 Flash for analysis...");
     
     // Attempt 2: Gemini 2.5 Flash
     for (let i = 0; i < 3; i++) {
@@ -359,10 +338,9 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
                 return JSON.parse(response.text) as AnalysisResult;
             }
         } catch (flashError: any) {
-             console.error(`Flash Analysis attempt ${i+1} failed`, flashError);
              const flashMsg = (flashError.message || '').toLowerCase();
              if (flashMsg.includes('429')) {
-                 await delay(30000); // Heavy wait if even flash fails
+                 await delay(30000); 
              } else {
                  await delay(5000);
              }

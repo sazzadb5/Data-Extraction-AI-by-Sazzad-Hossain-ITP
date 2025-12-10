@@ -26,7 +26,9 @@ export enum ExportFormat {
 }
 
 export interface FileData {
+  id: string; // Added ID for list management
   base64: string;
   mimeType: string;
   name: string;
+  size: number;
 }
