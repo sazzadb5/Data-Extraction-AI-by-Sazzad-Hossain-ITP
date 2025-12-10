@@ -133,6 +133,24 @@ const App: React.FC = () => {
     }
   };
 
+  const handleReAnalyze = async () => {
+    if (extractedData.length === 0) return;
+
+    // Reuse the 'analyzing' step UI, but keep extractedData intact
+    setStatus({ isProcessing: true, step: 'analyzing', message: 'Re-analyzing extracted data...', progress: 100 });
+    setAnalysis(null);
+
+    try {
+        const analysisResult = await analyzeExtractedData(extractedData);
+        setAnalysis(analysisResult);
+        setStatus({ isProcessing: false, step: 'complete', progress: 100 });
+    } catch (error: any) {
+        console.error("Re-analysis Error:", error);
+        const friendlyMsg = getFriendlyErrorMessage(error);
+        setStatus({ isProcessing: false, step: 'error', message: friendlyMsg, progress: 0 });
+    }
+  };
+
   return (
     <div className="min-h-screen flex flex-col">
       
@@ -230,6 +248,7 @@ const App: React.FC = () => {
               analysis={analysis} 
               preferredFormat={preferredFormat}
               onFormatSelected={handleFormatChange}
+              onReAnalyze={handleReAnalyze}
             />
           )}
 

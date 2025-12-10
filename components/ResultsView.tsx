@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Download, Table, BarChart2, PieChart, Activity, Copy, Check, FileSpreadsheet, FileText, Lightbulb, Star } from 'lucide-react';
+import { Download, Table, BarChart2, PieChart, Activity, Copy, Check, FileSpreadsheet, FileText, Lightbulb, Star, RefreshCw, Brain } from 'lucide-react';
 import { ExtractedItem, AnalysisResult, ExportFormat } from '../types';
 import { handleExport, convertToTSV, copyToClipboard } from '../utils/export';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
@@ -9,13 +9,15 @@ interface ResultsViewProps {
   analysis: AnalysisResult | null;
   preferredFormat: ExportFormat;
   onFormatSelected: (format: ExportFormat) => void;
+  onReAnalyze: () => void;
 }
 
 export const ResultsView: React.FC<ResultsViewProps> = ({ 
   data, 
   analysis, 
   preferredFormat, 
-  onFormatSelected 
+  onFormatSelected,
+  onReAnalyze
 }) => {
   const [copied, setCopied] = useState(false);
 
@@ -65,12 +67,21 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
     <div className="w-full max-w-6xl mx-auto space-y-8 animate-fade-in-up">
       
       {/* Analysis Section */}
-      {analysis && (
+      {analysis ? (
         <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-          <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 col-span-1 md:col-span-2">
-            <h3 className="text-lg font-semibold text-blue-400 mb-2 flex items-center gap-2">
-              <Activity size={20} /> AI Analysis
-            </h3>
+          <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 col-span-1 md:col-span-2 relative group">
+            <div className="flex justify-between items-start mb-2">
+                <h3 className="text-lg font-semibold text-blue-400 flex items-center gap-2">
+                <Activity size={20} /> AI Analysis
+                </h3>
+                <button 
+                    onClick={onReAnalyze}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 bg-slate-700/50 hover:bg-slate-700 text-slate-300 text-xs rounded transition border border-slate-600 hover:text-white"
+                    title="Regenerate analysis with Gemini 3 Pro"
+                >
+                    <RefreshCw size={12} /> Regenerate
+                </button>
+            </div>
             <p className="text-slate-300 text-sm leading-relaxed mb-4">{analysis.summary}</p>
             
             <div className="flex flex-wrap gap-2 mb-4">
@@ -116,6 +127,24 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
                ))}
              </ul>
           </div>
+        </div>
+      ) : (
+        <div className="bg-slate-800/50 p-6 rounded-xl border border-slate-700/50 flex flex-col sm:flex-row justify-between items-center gap-4">
+            <div className="flex items-center gap-3">
+                 <div className="p-2 bg-purple-500/10 rounded-lg">
+                    <Brain size={24} className="text-purple-400" />
+                 </div>
+                 <div>
+                    <h3 className="text-base font-medium text-slate-200">Deep Analysis Available</h3>
+                    <p className="text-xs text-slate-400">Use Gemini 3 Pro Thinking Mode to analyze this dataset.</p>
+                 </div>
+            </div>
+            <button 
+                onClick={onReAnalyze} 
+                className="flex items-center gap-2 bg-purple-600 hover:bg-purple-500 text-white px-4 py-2 rounded-lg transition text-sm font-medium shadow-lg shadow-purple-500/20"
+            >
+                <Brain size={16} /> Analyze Data
+            </button>
         </div>
       )}
 
