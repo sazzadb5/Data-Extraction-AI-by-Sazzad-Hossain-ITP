@@ -1,19 +1,47 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { Database, Zap, Cpu, AlertCircle } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { ResultsView } from './components/ResultsView';
 import { extractStructuredData, analyzeExtractedData } from './services/gemini';
-import { ExtractedItem, AnalysisResult, ProcessingStatus, FileData } from './types';
+import { ExtractedItem, AnalysisResult, ProcessingStatus, FileData, ExportFormat } from './types';
+import { 
+  getStoredInstruction, 
+  setStoredInstruction, 
+  getInstructionHistory, 
+  addToInstructionHistory,
+  getStoredExportFormat,
+  setStoredExportFormat 
+} from './utils/storage';
 
 const App: React.FC = () => {
+  // Initialize state from localStorage
   const [rawText, setRawText] = useState("");
   const [fileData, setFileData] = useState<FileData | null>(null);
-  const [instruction, setInstruction] = useState("Extract key information into a table");
+  const [instruction, setInstructionState] = useState(getStoredInstruction());
+  const [history, setHistory] = useState<string[]>([]);
+  const [preferredFormat, setPreferredFormat] = useState<ExportFormat>(ExportFormat.CSV);
   
   const [extractedData, setExtractedData] = useState<ExtractedItem[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   
   const [status, setStatus] = useState<ProcessingStatus>({ isProcessing: false, step: 'idle' });
+
+  // Load history and format on mount
+  useEffect(() => {
+    setHistory(getInstructionHistory());
+    setPreferredFormat(getStoredExportFormat());
+  }, []);
+
+  // Wrapper to update instruction state and storage
+  const setInstruction = (newInstruction: string) => {
+    setInstructionState(newInstruction);
+    setStoredInstruction(newInstruction);
+  };
+
+  const handleFormatChange = (format: ExportFormat) => {
+    setPreferredFormat(format);
+    setStoredExportFormat(format);
+  };
 
   const getFriendlyErrorMessage = (error: any): string => {
     const msg = (error.message || error.toString()).toLowerCase();
@@ -61,6 +89,10 @@ const App: React.FC = () => {
     if (!validateInput()) {
       return;
     }
+
+    // Save to history start
+    const newHistory = addToInstructionHistory(instruction);
+    setHistory(newHistory);
 
     setStatus({ isProcessing: true, step: 'extracting', message: 'Extracting data (this may take a moment for large files)...' });
     setExtractedData([]);
@@ -137,6 +169,7 @@ const App: React.FC = () => {
             setFileData={setFileData}
             instruction={instruction}
             setInstruction={setInstruction}
+            history={history}
             onProcess={handleProcess}
             isProcessing={status.isProcessing}
           />
@@ -164,7 +197,12 @@ const App: React.FC = () => {
 
           {/* Results Section */}
           {!status.isProcessing && extractedData.length > 0 && (
-            <ResultsView data={extractedData} analysis={analysis} />
+            <ResultsView 
+              data={extractedData} 
+              analysis={analysis} 
+              preferredFormat={preferredFormat}
+              onFormatSelected={handleFormatChange}
+            />
           )}
 
         </div>

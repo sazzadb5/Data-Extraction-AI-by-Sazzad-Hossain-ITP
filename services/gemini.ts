@@ -19,6 +19,17 @@ const chunkArray = (arr: number[], size: number) => {
   return res;
 };
 
+// Helper to convert base64 to Uint8Array
+const base64ToUint8Array = (base64: string): Uint8Array => {
+  const binaryString = atob(base64);
+  const len = binaryString.length;
+  const bytes = new Uint8Array(len);
+  for (let i = 0; i < len; i++) {
+    bytes[i] = binaryString.charCodeAt(i);
+  }
+  return bytes;
+};
+
 /**
  * Extracts structured data from unstructured text or file inputs (PDF/Images).
  * Uses Gemini 2.5 Flash which has a massive context window (1M+ tokens).
@@ -33,11 +44,22 @@ export const extractStructuredData = async (
   const model = "gemini-2.5-flash";
 
   // Handle Large PDF Splitting
-  if (fileData && fileData.mimeType === 'application/pdf') {
+  // Check mimeType OR extension to be robust
+  const isPdf = fileData && (
+    fileData.mimeType === 'application/pdf' || 
+    fileData.name.toLowerCase().endsWith('.pdf')
+  );
+
+  if (fileData && isPdf) {
     try {
-      const pdfDoc = await PDFDocument.load(fileData.base64);
+      console.log("Attempting to load PDF for page count check...");
+      // Convert to Uint8Array for more robust loading in pdf-lib
+      const pdfBytes = base64ToUint8Array(fileData.base64);
+      const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
-      const MAX_PAGES_PER_CHUNK = 800; // Safe limit under 1000
+      
+      // Reduce chunk size to 500 to be safe and avoid timeouts/latency issues
+      const MAX_PAGES_PER_CHUNK = 500; 
 
       if (totalPages > 1000) {
         console.log(`Large PDF detected (${totalPages} pages). Splitting into chunks...`);
@@ -49,17 +71,19 @@ export const extractStructuredData = async (
         // Process chunks sequentially to avoid rate limits and memory issues
         for (let i = 0; i < pageChunks.length; i++) {
           const chunkIndices = pageChunks[i];
+          console.log(`Processing chunk ${i + 1}/${pageChunks.length} (${chunkIndices.length} pages)...`);
+          
           const subDoc = await PDFDocument.create();
           const copiedPages = await subDoc.copyPages(pdfDoc, chunkIndices);
           copiedPages.forEach((page) => subDoc.addPage(page));
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          console.log(`Processing chunk ${i + 1}/${pageChunks.length} (${chunkIndices.length} pages)...`);
-          
+          // Use the chunk as a new fileData object
           const chunkResponse = await callGeminiExtract(ai, model, prompt, rawText, {
             ...fileData,
-            base64: subDocBase64
+            base64: subDocBase64,
+            mimeType: 'application/pdf' // Ensure mimeType is set correctly for the chunk
           });
           
           aggregatedData = [...aggregatedData, ...chunkResponse];
@@ -68,12 +92,13 @@ export const extractStructuredData = async (
         return aggregatedData;
       }
     } catch (err) {
-      console.warn("Failed to split PDF, falling back to single request:", err);
-      // Fall through to standard execution if splitting fails
+      console.warn("PDF pre-processing/splitting failed. Falling back to sending original file.", err);
+      // We fall through to standard execution, which might error if file > 1000 pages, 
+      // but it's the best fallback we have if local processing fails.
     }
   }
 
-  // Standard Execution (Images, Text, Small PDFs)
+  // Standard Execution (Images, Text, Small PDFs, or failed split attempts)
   return callGeminiExtract(ai, model, prompt, rawText, fileData);
 };
 

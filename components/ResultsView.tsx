@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Download, Table, BarChart2, PieChart, Activity, Copy, Check, FileSpreadsheet, FileText, Lightbulb } from 'lucide-react';
+import { Download, Table, BarChart2, PieChart, Activity, Copy, Check, FileSpreadsheet, FileText, Lightbulb, Star } from 'lucide-react';
 import { ExtractedItem, AnalysisResult, ExportFormat } from '../types';
 import { handleExport, convertToTSV, copyToClipboard } from '../utils/export';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
@@ -7,9 +7,16 @@ import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGri
 interface ResultsViewProps {
   data: ExtractedItem[];
   analysis: AnalysisResult | null;
+  preferredFormat: ExportFormat;
+  onFormatSelected: (format: ExportFormat) => void;
 }
 
-export const ResultsView: React.FC<ResultsViewProps> = ({ data, analysis }) => {
+export const ResultsView: React.FC<ResultsViewProps> = ({ 
+  data, 
+  analysis, 
+  preferredFormat, 
+  onFormatSelected 
+}) => {
   const [copied, setCopied] = useState(false);
 
   // Dynamically get headers from the first few items
@@ -41,6 +48,11 @@ export const ResultsView: React.FC<ResultsViewProps> = ({ data, analysis }) => {
       setCopied(true);
       setTimeout(() => setCopied(false), 2000);
     }
+  };
+
+  const onExport = (format: ExportFormat) => {
+    handleExport(data, format);
+    onFormatSelected(format);
   };
 
   if (data.length === 0) return null;
@@ -131,7 +143,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({ data, analysis }) => {
             <Table size={20} /> Extracted Data <span className="text-sm font-normal text-slate-500">({data.length} records)</span>
           </h3>
           
-          <div className="flex gap-2 flex-wrap">
+          <div className="flex gap-2 flex-wrap items-center">
             <button
               onClick={handleCopy}
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition
@@ -144,33 +156,34 @@ export const ResultsView: React.FC<ResultsViewProps> = ({ data, analysis }) => {
             
             <div className="w-px h-6 bg-slate-600 mx-1 hidden sm:block"></div>
 
-            <button
-               onClick={() => handleExport(data, ExportFormat.CSV)}
-               className="flex items-center gap-1.5 px-3 py-1.5 bg-green-700/80 hover:bg-green-600 text-white rounded text-xs font-medium transition"
-             >
-               <FileSpreadsheet size={12} /> Excel / CSV
-             </button>
-
-             <button
-               onClick={() => handleExport(data, ExportFormat.TXT)}
-               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-xs font-medium transition"
-             >
-               <FileText size={12} /> Text
-             </button>
-
-             <button
-               onClick={() => handleExport(data, ExportFormat.RTF)}
-               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-xs font-medium transition"
-             >
-               <Download size={12} /> RTF
-             </button>
-             
-             <button
-               onClick={() => handleExport(data, ExportFormat.JSON)}
-               className="flex items-center gap-1.5 px-3 py-1.5 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded text-xs font-medium transition"
-             >
-               <Download size={12} /> JSON
-             </button>
+             {/* Export Buttons - Highlight preferred */}
+             {[
+               { format: ExportFormat.CSV, label: 'Excel / CSV', icon: FileSpreadsheet },
+               { format: ExportFormat.TXT, label: 'Text', icon: FileText },
+               { format: ExportFormat.RTF, label: 'RTF', icon: Download },
+               { format: ExportFormat.JSON, label: 'JSON', icon: Download }
+             ].map((btn) => {
+               const isPreferred = preferredFormat === btn.format;
+               return (
+                 <button
+                   key={btn.format}
+                   onClick={() => onExport(btn.format)}
+                   className={`flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition relative group
+                     ${isPreferred 
+                       ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20 ring-1 ring-blue-400' 
+                       : 'bg-slate-700 hover:bg-slate-600 text-slate-200'}
+                   `}
+                   title={isPreferred ? "Default Format" : "Export"}
+                 >
+                   <btn.icon size={12} /> {btn.label}
+                   {isPreferred && (
+                     <div className="absolute -top-1 -right-1 w-2.5 h-2.5 bg-yellow-400 rounded-full border border-slate-800 flex items-center justify-center">
+                       <Star size={6} className="text-slate-900 fill-slate-900" />
+                     </div>
+                   )}
+                 </button>
+               );
+             })}
           </div>
         </div>
 

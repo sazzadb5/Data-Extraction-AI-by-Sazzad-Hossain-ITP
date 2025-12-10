@@ -9,6 +9,7 @@ interface InputSectionProps {
   setFileData: (data: FileData | null) => void;
   instruction: string;
   setInstruction: (text: string) => void;
+  history: string[];
   onProcess: () => void;
   isProcessing: boolean;
 }
@@ -20,6 +21,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
   setFileData,
   instruction,
   setInstruction,
+  history,
   onProcess,
   isProcessing
 }) => {
@@ -127,13 +129,19 @@ export const InputSection: React.FC<InputSectionProps> = ({
         </label>
         <input
           type="text"
+          list="instruction-history"
           className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition placeholder-slate-500"
           placeholder="e.g., Extract Invoice Number, Date, and Amount from page 1. Find the code starting with '00'."
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
         />
+        <datalist id="instruction-history">
+          {history.map((item, index) => (
+            <option key={index} value={item} />
+          ))}
+        </datalist>
         <p className="text-xs text-slate-500 mt-1">
-          Tip: Be specific about fields. To preserve "026" as text, mention "keep leading zeros".
+          Tip: Be specific about fields. Your recent instructions are saved automatically.
         </p>
       </div>
 
