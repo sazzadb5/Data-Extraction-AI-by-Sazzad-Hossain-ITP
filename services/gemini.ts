@@ -40,10 +40,13 @@ const base64ToUint8Array = (base64: string): Uint8Array => {
   return bytes;
 };
 
+// Helper for delay
+const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
+
 /**
  * Extracts structured data from unstructured text or file inputs (PDF/Images).
  * Uses Gemini 2.5 Flash which has a 1M token context window.
- * Automatically splits inputs to bypass API limits, supporting effectively infinite size.
+ * Automatically splits inputs to bypass API limits and network payload restrictions.
  */
 export const extractStructuredData = async (
   prompt: string,
@@ -66,10 +69,9 @@ export const extractStructuredData = async (
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
       
-      // DRASTICALLY REDUCED CHUNK SIZE to satisfy 1M token limit.
-      // 50 pages * ~5000 tokens (very dense) = 250k tokens.
-      // This allows plenty of room for prompt and output overhead.
-      const MAX_PAGES_PER_CHUNK = 50; 
+      // DRASTICALLY REDUCED CHUNK SIZE to prevent XHR/Network errors.
+      // 10 pages is a safe bet for most network connections to avoid 500 errors.
+      const MAX_PAGES_PER_CHUNK = 10; 
 
       if (totalPages > MAX_PAGES_PER_CHUNK) {
         console.log(`Large PDF detected (${totalPages} pages). Splitting into ${MAX_PAGES_PER_CHUNK} page chunks...`);
@@ -89,7 +91,10 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          const chunkResponse = await callGeminiExtract(ai, model, prompt, rawText, {
+          // Add a small delay between chunks to avoid rate limiting
+          if (i > 0) await delay(1000);
+
+          const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, {
             ...fileData,
             base64: subDocBase64,
             mimeType: 'application/pdf'
@@ -105,10 +110,9 @@ export const extractStructuredData = async (
     }
   }
 
-  // 2. Handle Large Text Splitting (for massive CSV/TXT pastes)
-  // 1 Token ~= 4 chars. 1M Tokens ~= 4M chars. 
-  // We set a safety limit of ~3M chars (~750k tokens) to stay safe.
-  const MAX_TEXT_LENGTH = 3000000; 
+  // 2. Handle Large Text Splitting
+  // Reduced to 100k chars to avoid network payload limits (500 errors)
+  const MAX_TEXT_LENGTH = 100000; 
 
   if (!fileData && rawText.length > MAX_TEXT_LENGTH) {
       console.log(`Large Text input detected (${rawText.length} chars). Splitting...`);
@@ -117,17 +121,48 @@ export const extractStructuredData = async (
       
       for (let i = 0; i < chunks.length; i++) {
         console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
-        const chunkResponse = await callGeminiExtract(ai, model, prompt, chunks[i], null);
+        // Add delay between chunks
+        if (i > 0) await delay(1000);
+        
+        const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], null);
         aggregatedData = [...aggregatedData, ...chunkResponse];
       }
       return aggregatedData;
   }
 
   // Standard Execution (Images, Small Texts, Small PDFs)
-  return callGeminiExtract(ai, model, prompt, rawText, fileData);
+  return callGeminiExtractWithRetry(ai, model, prompt, rawText, fileData);
 };
 
-// Helper function for the actual API call
+// Wrapped call with Retry Logic
+const callGeminiExtractWithRetry = async (
+  ai: GoogleGenAI, 
+  model: string, 
+  prompt: string, 
+  rawText: string, 
+  fileData?: FileData | null,
+  retries = 3
+): Promise<ExtractedItem[]> => {
+  for (let attempt = 1; attempt <= retries; attempt++) {
+    try {
+      return await callGeminiExtract(ai, model, prompt, rawText, fileData);
+    } catch (e: any) {
+      console.error(`Attempt ${attempt} failed:`, e);
+      if (attempt === retries) throw e; // Throw on final attempt
+      
+      // If error is 500/503 or network related, wait and retry
+      if (e.message?.includes('500') || e.message?.includes('503') || e.message?.includes('xhr') || e.message?.includes('fetch')) {
+         console.log(`Retrying in ${attempt * 2} seconds...`);
+         await delay(attempt * 2000);
+      } else {
+        throw e; // Don't retry for other errors (like 400 Bad Request if validation fails, unless it's the token one which we can't really fix by retrying exactly same payload, but here we assume chunking handled that)
+      }
+    }
+  }
+  return [];
+};
+
+// Core API Call
 const callGeminiExtract = async (
   ai: GoogleGenAI, 
   model: string, 
@@ -154,38 +189,40 @@ const callGeminiExtract = async (
     userContent.push({ text: `Extract the following data structures based on this instruction: "${prompt}".\n\nData Source:\n${rawText}` });
   }
 
+  const response = await ai.models.generateContent({
+    model,
+    contents: {
+      role: 'user',
+      parts: userContent
+    },
+    config: {
+      systemInstruction: `You are a high-capacity data extraction engine. 
+      CRITICAL FORMATTING RULES:
+      1. Output MUST be a valid JSON Array.
+      2. PRESERVE LEADING ZEROS exactly as they appear (e.g., "026" stays "026").
+      3. Treat ID numbers and codes as STRINGS.
+      4. Extract specific data fields as requested. If a field is not found, use null.
+      5. Do not include markdown code blocks. Just raw JSON.
+      6. If processing a partial chunk of a larger document, extract all relevant complete records found in this chunk.`,
+      responseMimeType: "application/json",
+      temperature: 0.1,
+    },
+  });
+
+  const text = response.text;
+  if (!text) return [];
+
   try {
-    const response = await ai.models.generateContent({
-      model,
-      contents: {
-        role: 'user',
-        parts: userContent
-      },
-      config: {
-        systemInstruction: `You are a high-capacity data extraction engine. 
-        CRITICAL FORMATTING RULES:
-        1. Output MUST be a valid JSON Array.
-        2. PRESERVE LEADING ZEROS exactly as they appear (e.g., "026" stays "026").
-        3. Treat ID numbers and codes as STRINGS.
-        4. Extract specific data fields as requested. If a field is not found, use null.
-        5. Do not include markdown code blocks. Just raw JSON.
-        6. If processing a partial chunk of a larger document, extract all relevant complete records found in this chunk.`,
-        responseMimeType: "application/json",
-        temperature: 0.1,
-      },
-    });
-
-    const text = response.text;
-    if (!text) return [];
-
     const json = JSON.parse(text);
     return Array.isArray(json) ? json : [json];
-
-  } catch (e: any) {
-    console.error("Gemini API Call Failed:", e);
-    // If we hit a token limit inside a chunk that was supposedly safe, we return empty to not crash the whole batch
-    if (e.message && e.message.includes('token')) {
-        console.error("Token limit hit in chunk.");
+  } catch (e) {
+    console.warn("Failed to parse JSON from chunk, trying cleanup", text.substring(0, 100));
+    // Fallback: try to find array in text
+    const match = text.match(/\[.*\]/s);
+    if (match) {
+        try {
+            return JSON.parse(match[0]);
+        } catch (err) { return []; }
     }
     return [];
   }
@@ -196,9 +233,8 @@ const callGeminiExtract = async (
  */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
-  // We limit analysis context to ~5000 items to avoid token limits on the analysis step
-  // 5000 items * ~20 tokens/item = 100k tokens. Safe.
-  const dataStr = JSON.stringify(data.slice(0, 5000)); 
+  // Limit context for analysis
+  const dataStr = JSON.stringify(data.slice(0, 2000)); 
 
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
