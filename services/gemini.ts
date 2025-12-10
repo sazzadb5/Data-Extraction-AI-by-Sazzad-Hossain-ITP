@@ -1,4 +1,5 @@
 import { GoogleGenAI, Type } from "@google/genai";
+import { PDFDocument } from 'pdf-lib';
 import { ExtractedItem, AnalysisResult, FileData } from "../types";
 
 const getAiClient = () => {
@@ -9,10 +10,19 @@ const getAiClient = () => {
   return new GoogleGenAI({ apiKey });
 };
 
+// Helper to chunk array
+const chunkArray = (arr: number[], size: number) => {
+  const res = [];
+  for (let i = 0; i < arr.length; i += size) {
+    res.push(arr.slice(i, i + size));
+  }
+  return res;
+};
+
 /**
  * Extracts structured data from unstructured text or file inputs (PDF/Images).
- * Uses Gemini 2.5 Flash which has a massive context window (1M+ tokens),
- * making it suitable for processing large documents (e.g. 5K page PDFs).
+ * Uses Gemini 2.5 Flash which has a massive context window (1M+ tokens).
+ * Automatically splits PDFs larger than 1000 pages to bypass API limits.
  */
 export const extractStructuredData = async (
   prompt: string,
@@ -20,13 +30,63 @@ export const extractStructuredData = async (
   fileData?: FileData | null
 ): Promise<ExtractedItem[]> => {
   const ai = getAiClient();
+  const model = "gemini-2.5-flash";
 
-  // Gemini 2.5 Flash is recommended for high-volume text and multimodal tasks.
-  const model = "gemini-2.5-flash"; 
+  // Handle Large PDF Splitting
+  if (fileData && fileData.mimeType === 'application/pdf') {
+    try {
+      const pdfDoc = await PDFDocument.load(fileData.base64);
+      const totalPages = pdfDoc.getPageCount();
+      const MAX_PAGES_PER_CHUNK = 800; // Safe limit under 1000
 
+      if (totalPages > 1000) {
+        console.log(`Large PDF detected (${totalPages} pages). Splitting into chunks...`);
+        const pageIndices = Array.from({ length: totalPages }, (_, i) => i);
+        const pageChunks = chunkArray(pageIndices, MAX_PAGES_PER_CHUNK);
+        
+        let aggregatedData: ExtractedItem[] = [];
+
+        // Process chunks sequentially to avoid rate limits and memory issues
+        for (let i = 0; i < pageChunks.length; i++) {
+          const chunkIndices = pageChunks[i];
+          const subDoc = await PDFDocument.create();
+          const copiedPages = await subDoc.copyPages(pdfDoc, chunkIndices);
+          copiedPages.forEach((page) => subDoc.addPage(page));
+          
+          const subDocBase64 = await subDoc.saveAsBase64();
+          
+          console.log(`Processing chunk ${i + 1}/${pageChunks.length} (${chunkIndices.length} pages)...`);
+          
+          const chunkResponse = await callGeminiExtract(ai, model, prompt, rawText, {
+            ...fileData,
+            base64: subDocBase64
+          });
+          
+          aggregatedData = [...aggregatedData, ...chunkResponse];
+        }
+        
+        return aggregatedData;
+      }
+    } catch (err) {
+      console.warn("Failed to split PDF, falling back to single request:", err);
+      // Fall through to standard execution if splitting fails
+    }
+  }
+
+  // Standard Execution (Images, Text, Small PDFs)
+  return callGeminiExtract(ai, model, prompt, rawText, fileData);
+};
+
+// Helper function for the actual API call
+const callGeminiExtract = async (
+  ai: GoogleGenAI, 
+  model: string, 
+  prompt: string, 
+  rawText: string, 
+  fileData?: FileData | null
+): Promise<ExtractedItem[]> => {
   let userContent: any[] = [];
   
-  // Prioritize file content if available, but include text if present as context
   if (fileData) {
     userContent.push({
       inlineData: {
@@ -35,13 +95,12 @@ export const extractStructuredData = async (
       },
     });
     
-    let textPrompt = `Extract structured data from this document based on the following goal: "${prompt}". Return a valid JSON Array.`;
+    let textPrompt = `Extract structured data from this document part based on the following goal: "${prompt}". Return a valid JSON Array.`;
     if (rawText) {
       textPrompt += `\n\nAdditional Context:\n${rawText}`;
     }
     userContent.push({ text: textPrompt });
   } else {
-    // Text-only mode
     userContent.push({ text: `Extract the following data structures based on this instruction: "${prompt}".\n\nData Source:\n${rawText}` });
   }
 
@@ -52,27 +111,29 @@ export const extractStructuredData = async (
       parts: userContent
     },
     config: {
-      systemInstruction: `You are a high-capacity data extraction engine capable of processing thousands of records. 
+      systemInstruction: `You are a high-capacity data extraction engine. 
       CRITICAL FORMATTING RULES:
       1. Output MUST be a valid JSON Array.
-      2. PRESERVE LEADING ZEROS exactly as they appear in the source text (e.g., if source has "026", extract it as the string "026", NOT the number 26).
-      3. Treat ID numbers, phone numbers, and codes as STRINGS to maintain formatting.
-      4. Extract specific data fields as requested by the user. If a field is not found, use null.
+      2. PRESERVE LEADING ZEROS exactly as they appear (e.g., "026" stays "026").
+      3. Treat ID numbers and codes as STRINGS.
+      4. Extract specific data fields as requested. If a field is not found, use null.
       5. Do not include markdown code blocks. Just raw JSON.
-      6. Be concise to maximize the number of records you can return.`,
+      6. If processing a partial chunk of a larger document, extract all relevant complete records found in this chunk.`,
       responseMimeType: "application/json",
-      temperature: 0.1, // Low temperature for factual extraction
+      temperature: 0.1,
     },
   });
 
   const text = response.text;
-  if (!text) throw new Error("No data returned from AI");
+  if (!text) return []; // Return empty array if no data generated for this chunk
 
   try {
-    return JSON.parse(text);
+    const json = JSON.parse(text);
+    return Array.isArray(json) ? json : [json];
   } catch (e) {
     console.error("Failed to parse AI response", text);
-    throw new Error("AI response was not valid JSON");
+    // Return empty array on parse failure to not break the whole chain
+    return [];
   }
 };
 
@@ -83,7 +144,6 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
   const ai = getAiClient();
   // Gemini 2.5 Flash has a 1M token context window.
   // We can send a significantly larger portion of the dataset for analysis.
-  // Increasing slice from 150 to 5000 records to support large "page limit" requests.
   const dataStr = JSON.stringify(data.slice(0, 5000)); 
 
   const response = await ai.models.generateContent({
