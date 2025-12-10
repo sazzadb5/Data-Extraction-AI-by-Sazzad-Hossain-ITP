@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { Database, Zap, Cpu, AlertCircle } from 'lucide-react';
+import { Database, Zap, Cpu, AlertCircle, Brain } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { ResultsView } from './components/ResultsView';
 import { extractStructuredData, analyzeExtractedData } from './services/gemini';
@@ -24,7 +24,10 @@ const App: React.FC = () => {
   const [extractedData, setExtractedData] = useState<ExtractedItem[]>([]);
   const [analysis, setAnalysis] = useState<AnalysisResult | null>(null);
   
-  const [status, setStatus] = useState<ProcessingStatus>({ isProcessing: false, step: 'idle' });
+  // Model preference state
+  const [useFastModel, setUseFastModel] = useState(false);
+  
+  const [status, setStatus] = useState<ProcessingStatus>({ isProcessing: false, step: 'idle', progress: 0 });
 
   // Load history and format on mount
   useEffect(() => {
@@ -94,32 +97,39 @@ const App: React.FC = () => {
     const newHistory = addToInstructionHistory(instruction);
     setHistory(newHistory);
 
-    setStatus({ isProcessing: true, step: 'extracting', message: 'Extracting data (this may take a moment for large files)...' });
+    setStatus({ isProcessing: true, step: 'extracting', message: 'Initializing extraction...', progress: 0 });
     setExtractedData([]);
     setAnalysis(null);
 
     try {
       // Step 1: Extract
-      const data = await extractStructuredData(instruction, rawText, fileData);
+      const data = await extractStructuredData(
+        instruction, 
+        rawText, 
+        fileData,
+        (progress) => setStatus(prev => ({ ...prev, progress, message: `Extracting data (${progress}%)...` })),
+        useFastModel // Pass the user preference
+      );
+      
       setExtractedData(data);
 
       if (data.length > 0) {
-        setStatus({ isProcessing: true, step: 'analyzing', message: 'Analyzing patterns and heuristic data quality...' });
+        setStatus({ isProcessing: true, step: 'analyzing', message: 'Deep thinking analysis in progress...', progress: 100 });
         
-        // Step 2: Analyze
+        // Step 2: Analyze (Uses Thinking Mode / Gemini 3 Pro)
         const analysisResult = await analyzeExtractedData(data);
         setAnalysis(analysisResult);
       } else {
-        setStatus({ isProcessing: false, step: 'error', message: "No relevant data found matching your criteria." });
+        setStatus({ isProcessing: false, step: 'error', message: "No relevant data found matching your criteria.", progress: 0 });
         return;
       }
 
-      setStatus({ isProcessing: false, step: 'complete' });
+      setStatus({ isProcessing: false, step: 'complete', progress: 100 });
 
     } catch (error: any) {
       console.error("Processing Error:", error);
       const friendlyMsg = getFriendlyErrorMessage(error);
-      setStatus({ isProcessing: false, step: 'error', message: friendlyMsg });
+      setStatus({ isProcessing: false, step: 'error', message: friendlyMsg, progress: 0 });
     }
   };
 
@@ -138,9 +148,10 @@ const App: React.FC = () => {
               <p className="text-xs text-slate-400">High-Volume PDF & Data Engine</p>
             </div>
           </div>
-          <div className="flex items-center gap-4 text-sm text-slate-400">
-             <span className="flex items-center gap-1"><Zap size={14} className="text-yellow-400" /> 1M+ Token Context</span>
-             <span className="flex items-center gap-1"><Cpu size={14} className="text-blue-400" /> Gemini 2.5</span>
+          <div className="flex items-center gap-4 text-sm text-slate-400 hidden sm:flex">
+             <span className="flex items-center gap-1"><Zap size={14} className="text-yellow-400" /> Flash Lite</span>
+             <span className="flex items-center gap-1"><Cpu size={14} className="text-blue-400" /> Flash 2.5</span>
+             <span className="flex items-center gap-1"><Brain size={14} className="text-purple-400" /> Pro 3 Thinking</span>
           </div>
         </div>
       </header>
@@ -172,13 +183,30 @@ const App: React.FC = () => {
             history={history}
             onProcess={handleProcess}
             isProcessing={status.isProcessing}
+            useFastModel={useFastModel}
+            setUseFastModel={setUseFastModel}
           />
 
-          {/* Loading State */}
+          {/* Loading / Progress State */}
           {status.isProcessing && (
-            <div className="flex flex-col items-center justify-center py-12 animate-pulse">
-               <div className="h-12 w-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
-               <p className="text-lg text-blue-400 font-medium">{status.message}</p>
+            <div className="flex flex-col items-center justify-center py-12 max-w-xl mx-auto w-full space-y-4 animate-fade-in">
+               <div className="w-full flex justify-between text-sm text-blue-400 font-medium mb-1">
+                 <span>{status.message}</span>
+                 <span>{status.progress || 0}%</span>
+               </div>
+               <div className="w-full bg-slate-800 border border-slate-700 rounded-full h-3 overflow-hidden shadow-inner relative">
+                 <div 
+                   className="bg-gradient-to-r from-blue-600 to-blue-400 h-full rounded-full transition-all duration-500 ease-out relative overflow-hidden" 
+                   style={{ width: `${Math.max(2, status.progress || 0)}%` }}
+                 >
+                   <div className="absolute inset-0 bg-white/20 animate-pulse"></div>
+                 </div>
+               </div>
+               <p className="text-xs text-slate-500 text-center flex items-center justify-center gap-2">
+                 {status.step === 'analyzing' 
+                   ? <><Brain size={14} className="text-purple-400 animate-pulse"/> Gemini 3 Pro is thinking...</>
+                   : 'Processing document chunks in parallel...'}
+               </p>
             </div>
           )}
 

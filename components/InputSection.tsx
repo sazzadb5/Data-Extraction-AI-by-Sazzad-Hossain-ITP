@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Upload, FileText, Image as ImageIcon, X, File as FileIcon, FileSpreadsheet, FileJson } from 'lucide-react';
+import { Upload, FileText, Image as ImageIcon, X, File as FileIcon, FileSpreadsheet, FileJson, Zap } from 'lucide-react';
 import { FileData } from '../types';
 
 interface InputSectionProps {
@@ -12,6 +12,8 @@ interface InputSectionProps {
   history: string[];
   onProcess: () => void;
   isProcessing: boolean;
+  useFastModel: boolean;
+  setUseFastModel: (useFast: boolean) => void;
 }
 
 export const InputSection: React.FC<InputSectionProps> = ({
@@ -23,7 +25,9 @@ export const InputSection: React.FC<InputSectionProps> = ({
   setInstruction,
   history,
   onProcess,
-  isProcessing
+  isProcessing,
+  useFastModel,
+  setUseFastModel
 }) => {
   const [dragActive, setDragActive] = useState(false);
 
@@ -195,7 +199,18 @@ export const InputSection: React.FC<InputSectionProps> = ({
         </div>
       </div>
 
-      <div className="flex justify-end pt-2">
+      <div className="flex justify-between items-center pt-2">
+        
+        {/* Toggle Fast Mode */}
+        <button 
+          onClick={() => setUseFastModel(!useFastModel)}
+          className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition border ${useFastModel ? 'bg-yellow-500/10 border-yellow-500/50 text-yellow-400' : 'bg-slate-900 border-slate-700 text-slate-400 hover:bg-slate-800'}`}
+          title="Use 'Flash-Lite' for faster, low-latency extraction."
+        >
+          <Zap size={16} className={useFastModel ? "fill-yellow-400" : ""} />
+          {useFastModel ? "Turbo Mode On" : "Turbo Mode Off"}
+        </button>
+
         <button
           onClick={onProcess}
           disabled={isProcessing}

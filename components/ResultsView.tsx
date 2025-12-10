@@ -21,17 +21,21 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
 
   // Dynamically get headers from the first few items
   const headers = useMemo(() => {
-    if (data.length === 0) return [];
-    return Array.from(new Set(data.flatMap(Object.keys)));
+    if (!data || data.length === 0) return [];
+    // Ensure we don't crash on null items in the array (though service layer filters them now)
+    return Array.from(new Set(data.flatMap(row => row ? Object.keys(row) : [])));
   }, [data]);
 
   // Prepare chart data if numeric values exist
   const chartData = useMemo(() => {
-    if (data.length === 0) return [];
+    if (!data || data.length === 0) return [];
     
+    // Safe header check
+    if (headers.length === 0) return [];
+
     // Find a numeric key to visualize
-    const numericKey = headers.find(h => typeof data[0][h] === 'number');
-    const labelKey = headers.find(h => typeof data[0][h] === 'string' && h !== numericKey) || headers[0];
+    const numericKey = headers.find(h => data[0] && typeof data[0][h] === 'number');
+    const labelKey = headers.find(h => data[0] && typeof data[0][h] === 'string' && h !== numericKey) || headers[0];
     
     if (!numericKey) return [];
 
@@ -55,7 +59,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
     onFormatSelected(format);
   };
 
-  if (data.length === 0) return null;
+  if (!data || data.length === 0) return null;
 
   return (
     <div className="w-full max-w-6xl mx-auto space-y-8 animate-fade-in-up">
@@ -203,7 +207,7 @@ export const ResultsView: React.FC<ResultsViewProps> = ({
                   <td className="px-6 py-4 text-center font-mono text-slate-600">{idx + 1}</td>
                   {headers.map(h => (
                     <td key={`${idx}-${h}`} className="px-6 py-4 max-w-xs truncate text-slate-300">
-                      {row[h] !== null && row[h] !== undefined ? String(row[h]) : <span className="text-slate-600">-</span>}
+                      {row && row[h] !== null && row[h] !== undefined ? String(row[h]) : <span className="text-slate-600">-</span>}
                     </td>
                   ))}
                 </tr>

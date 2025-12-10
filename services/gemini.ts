@@ -51,10 +51,13 @@ const delay = (ms: number) => new Promise(resolve => setTimeout(resolve, ms));
 export const extractStructuredData = async (
   prompt: string,
   rawText: string,
-  fileData?: FileData | null
+  fileData?: FileData | null,
+  onProgress?: (progress: number) => void,
+  useFastModel: boolean = false
 ): Promise<ExtractedItem[]> => {
   const ai = getAiClient();
-  const model = "gemini-2.5-flash";
+  // Feature: Fast AI responses using gemini-2.5-flash-lite
+  const model = useFastModel ? "gemini-2.5-flash-lite" : "gemini-2.5-flash";
 
   // 1. Handle PDF Splitting
   const isPdf = fileData && (
@@ -65,13 +68,14 @@ export const extractStructuredData = async (
   if (fileData && isPdf) {
     try {
       console.log("Checking PDF size...");
+      onProgress?.(5); // Started
       const pdfBytes = base64ToUint8Array(fileData.base64);
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
       
-      // DRASTICALLY REDUCED CHUNK SIZE to prevent XHR/Network errors.
-      // 10 pages is a safe bet for most network connections to avoid 500 errors.
-      const MAX_PAGES_PER_CHUNK = 10; 
+      // DRASTICALLY REDUCED CHUNK SIZE to prevent XHR/Network errors (Error Code 500).
+      // 3 pages is very safe for avoiding payload size limits even with image-heavy PDFs.
+      const MAX_PAGES_PER_CHUNK = 3; 
 
       if (totalPages > MAX_PAGES_PER_CHUNK) {
         console.log(`Large PDF detected (${totalPages} pages). Splitting into ${MAX_PAGES_PER_CHUNK} page chunks...`);
@@ -91,8 +95,8 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          // Add a small delay between chunks to avoid rate limiting
-          if (i > 0) await delay(1000);
+          // Add a delay between chunks to avoid rate limiting
+          if (i > 0) await delay(1500);
 
           const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, {
             ...fileData,
@@ -101,6 +105,10 @@ export const extractStructuredData = async (
           });
           
           aggregatedData = [...aggregatedData, ...chunkResponse];
+          
+          // Update progress: Map 5% -> 95%
+          const percentage = Math.round(5 + ((i + 1) / pageChunks.length) * 90);
+          onProgress?.(percentage);
         }
         
         return aggregatedData;
@@ -111,27 +119,35 @@ export const extractStructuredData = async (
   }
 
   // 2. Handle Large Text Splitting
-  // Reduced to 100k chars to avoid network payload limits (500 errors)
-  const MAX_TEXT_LENGTH = 100000; 
+  // Reduced to 30k chars to avoid network payload limits (500 errors)
+  const MAX_TEXT_LENGTH = 30000; 
 
   if (!fileData && rawText.length > MAX_TEXT_LENGTH) {
       console.log(`Large Text input detected (${rawText.length} chars). Splitting...`);
+      onProgress?.(5);
       const chunks = chunkString(rawText, MAX_TEXT_LENGTH);
       let aggregatedData: ExtractedItem[] = [];
       
       for (let i = 0; i < chunks.length; i++) {
         console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
         // Add delay between chunks
-        if (i > 0) await delay(1000);
+        if (i > 0) await delay(1500);
         
         const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], null);
         aggregatedData = [...aggregatedData, ...chunkResponse];
+
+        // Update progress
+        const percentage = Math.round(5 + ((i + 1) / chunks.length) * 90);
+        onProgress?.(percentage);
       }
       return aggregatedData;
   }
 
   // Standard Execution (Images, Small Texts, Small PDFs)
-  return callGeminiExtractWithRetry(ai, model, prompt, rawText, fileData);
+  onProgress?.(10); // Start
+  const result = await callGeminiExtractWithRetry(ai, model, prompt, rawText, fileData);
+  onProgress?.(100); // Finish
+  return result;
 };
 
 // Wrapped call with Retry Logic
@@ -152,7 +168,7 @@ const callGeminiExtractWithRetry = async (
       
       // If error is 500/503 or network related, wait and retry
       if (e.message?.includes('500') || e.message?.includes('503') || e.message?.includes('xhr') || e.message?.includes('fetch')) {
-         console.log(`Retrying in ${attempt * 2} seconds...`);
+         console.log(`Retrying in ${attempt * 2000} ms...`);
          await delay(attempt * 2000);
       } else {
         throw e; // Don't retry for other errors (like 400 Bad Request if validation fails, unless it's the token one which we can't really fix by retrying exactly same payload, but here we assume chunking handled that)
@@ -214,14 +230,30 @@ const callGeminiExtract = async (
 
   try {
     const json = JSON.parse(text);
-    return Array.isArray(json) ? json : [json];
+    
+    // Safety check: Filter out nulls and invalid objects
+    if (!json) return []; 
+
+    if (Array.isArray(json)) {
+      return json.filter(item => item !== null && typeof item === 'object');
+    }
+    
+    // Handle single object response
+    if (typeof json === 'object') {
+      return [json];
+    }
+
+    return [];
   } catch (e) {
     console.warn("Failed to parse JSON from chunk, trying cleanup", text.substring(0, 100));
     // Fallback: try to find array in text
     const match = text.match(/\[.*\]/s);
     if (match) {
         try {
-            return JSON.parse(match[0]);
+            const parsed = JSON.parse(match[0]);
+            if (Array.isArray(parsed)) {
+                return parsed.filter(item => item !== null && typeof item === 'object');
+            }
         } catch (err) { return []; }
     }
     return [];
@@ -230,16 +262,18 @@ const callGeminiExtract = async (
 
 /**
  * Analyzes the extracted data to provide summary and insights.
+ * Feature: Think more when needed - Uses gemini-3-pro-preview with thinkingBudget
  */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
-  // Limit context for analysis
-  const dataStr = JSON.stringify(data.slice(0, 2000)); 
+  // Limit context for analysis to avoid huge payloads
+  const dataStr = JSON.stringify(data.slice(0, 500)); 
 
   const response = await ai.models.generateContent({
-    model: "gemini-2.5-flash",
+    model: "gemini-3-pro-preview", // Use Pro for complex analysis
     contents: `Analyze this dataset: ${dataStr}`,
     config: {
+      thinkingConfig: { thinkingBudget: 32768 }, // Enable Thinking Mode (Max budget)
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,

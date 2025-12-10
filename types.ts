@@ -1,3 +1,4 @@
+
 export interface ExtractedItem {
   [key: string]: string | number | boolean | null;
 }
@@ -14,6 +15,7 @@ export interface ProcessingStatus {
   isProcessing: boolean;
   step: 'idle' | 'extracting' | 'analyzing' | 'complete' | 'error';
   message?: string;
+  progress?: number;
 }
 
 export enum ExportFormat {
