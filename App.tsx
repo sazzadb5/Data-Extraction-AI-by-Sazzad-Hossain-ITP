@@ -52,8 +52,8 @@ const App: React.FC = () => {
     if (msg.includes('401') || msg.includes('api key')) {
       return "Authentication failed. Please check if your API Key is valid and set correctly.";
     }
-    if (msg.includes('429') || msg.includes('quota')) {
-      return "You've reached the request limit. Please wait a moment before trying again.";
+    if (msg.includes('429') || msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded')) {
+      return "Usage limit exceeded. The app paused and retried multiple times, but the API quota is still exhausted. Please wait 1-2 minutes before trying again.";
     }
     if (msg.includes('503') || msg.includes('overloaded')) {
       return "The AI service is currently experiencing high traffic. Please try again in a few seconds.";

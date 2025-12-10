@@ -73,9 +73,8 @@ export const extractStructuredData = async (
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
       
-      // DRASTICALLY REDUCED CHUNK SIZE to prevent XHR/Network errors (Error Code 500).
-      // 3 pages is very safe for avoiding payload size limits even with image-heavy PDFs.
-      const MAX_PAGES_PER_CHUNK = 3; 
+      // REDUCED CHUNK SIZE FURTHER: 2 pages to keep Token Count low per request.
+      const MAX_PAGES_PER_CHUNK = 2; 
 
       if (totalPages > MAX_PAGES_PER_CHUNK) {
         console.log(`Large PDF detected (${totalPages} pages). Splitting into ${MAX_PAGES_PER_CHUNK} page chunks...`);
@@ -95,8 +94,11 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          // Increased delay to prevent 429 Rate Limit errors
-          if (i > 0) await delay(2000);
+          // SIGNIFICANT DELAY: 4 seconds between chunks to stay under RPM/TPM limits
+          if (i > 0) {
+            console.log("Throttling request for 4s...");
+            await delay(4000);
+          }
 
           const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, rawText, {
             ...fileData,
@@ -119,8 +121,8 @@ export const extractStructuredData = async (
   }
 
   // 2. Handle Large Text Splitting
-  // Reduced to 30k chars to avoid network payload limits (500 errors)
-  const MAX_TEXT_LENGTH = 30000; 
+  // Reduced to 15k chars to keep token usage per request lower
+  const MAX_TEXT_LENGTH = 15000; 
 
   if (!fileData && rawText.length > MAX_TEXT_LENGTH) {
       console.log(`Large Text input detected (${rawText.length} chars). Splitting...`);
@@ -130,8 +132,9 @@ export const extractStructuredData = async (
       
       for (let i = 0; i < chunks.length; i++) {
         console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
-        // Increased delay to prevent 429 Rate Limit errors
-        if (i > 0) await delay(2000);
+        
+        // Throttling
+        if (i > 0) await delay(4000);
         
         const chunkResponse = await callGeminiExtractWithRetry(ai, model, prompt, chunks[i], null);
         aggregatedData = [...aggregatedData, ...chunkResponse];
@@ -157,7 +160,7 @@ const callGeminiExtractWithRetry = async (
   prompt: string, 
   rawText: string, 
   fileData?: FileData | null,
-  retries = 5 // Increased retries to handle rate limits better
+  retries = 10 // Increase retries to 10 to survive long quota lockouts
 ): Promise<ExtractedItem[]> => {
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -166,22 +169,28 @@ const callGeminiExtractWithRetry = async (
       console.error(`Attempt ${attempt} failed:`, e);
       if (attempt === retries) throw e; // Throw on final attempt
       
-      const msg = e.message?.toLowerCase() || '';
+      const msg = (e.message || e.toString()).toLowerCase();
 
-      // Handle 429 / Quota specifically with significant backoff
-      if (msg.includes('429') || msg.includes('quota') || msg.includes('limit')) {
-         const waitTime = attempt * 5000 + 2000; // 7s, 12s, 17s...
-         console.log(`Quota limit hit (429). Pausing for ${waitTime}ms before retry...`);
+      // Handle 429 / Quota specifically with AGGRESSIVE backoff
+      if (msg.includes('429') || msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded')) {
+         // Wait 10s, 20s, 30s... 
+         const waitTime = attempt * 10000; 
+         console.log(`Quota limit hit. Pausing for ${waitTime/1000}s before retry ${attempt + 1}/${retries}...`);
          await delay(waitTime);
          continue;
       }
 
       // If error is 500/503 or network related, wait and retry
       if (msg.includes('500') || msg.includes('503') || msg.includes('xhr') || msg.includes('fetch')) {
-         console.log(`Retrying in ${attempt * 2000} ms...`);
-         await delay(attempt * 2000);
+         console.log(`Server/Net error. Retrying in ${attempt * 3000} ms...`);
+         await delay(attempt * 3000);
       } else {
-        throw e; // Don't retry for other errors (like 400 Bad Request)
+         // Some other error, but maybe transient. Try a few times then fail.
+         if (attempt < 3) {
+             await delay(2000);
+         } else {
+            throw e; 
+         }
       }
     }
   }
@@ -278,7 +287,7 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
   const ai = getAiClient();
   // Limit context for analysis to avoid huge payloads
   const dataStr = JSON.stringify(data.slice(0, 500)); 
-  let retries = 3;
+  let retries = 5; // Increased retries for analysis too
 
   for (let attempt = 1; attempt <= retries; attempt++) {
     try {
@@ -314,15 +323,18 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
        console.error(`Analysis attempt ${attempt} failed:`, e);
        if (attempt === retries) throw e;
        
-       const msg = e.message?.toLowerCase() || '';
-       if (msg.includes('429') || msg.includes('quota') || msg.includes('limit')) {
-         const waitTime = attempt * 5000 + 3000;
-         console.log(`Analysis Quota hit. Waiting ${waitTime}ms...`);
+       const msg = (e.message || e.toString()).toLowerCase();
+       
+       if (msg.includes('429') || msg.includes('quota') || msg.includes('limit') || msg.includes('exceeded')) {
+         const waitTime = attempt * 10000;
+         console.log(`Analysis Quota hit. Waiting ${waitTime/1000}s...`);
          await delay(waitTime);
        } else if (msg.includes('500') || msg.includes('503')) {
-         await delay(2000);
+         await delay(3000);
        } else {
-         throw e;
+         // For analysis, we can be a bit more lenient, try a few times then fail
+         if (attempt < 3) await delay(2000);
+         else throw e;
        }
     }
   }
