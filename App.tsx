@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Database, Zap, Cpu } from 'lucide-react';
+import { Database, Zap, Cpu, AlertCircle } from 'lucide-react';
 import { InputSection } from './components/InputSection';
 import { ResultsView } from './components/ResultsView';
 import { extractStructuredData, analyzeExtractedData } from './services/gemini';
@@ -15,9 +15,34 @@ const App: React.FC = () => {
   
   const [status, setStatus] = useState<ProcessingStatus>({ isProcessing: false, step: 'idle' });
 
+  const getFriendlyErrorMessage = (error: any): string => {
+    const msg = (error.message || error.toString()).toLowerCase();
+    
+    if (msg.includes('401') || msg.includes('api key')) {
+      return "Authentication failed. Please check if your API Key is valid and set correctly.";
+    }
+    if (msg.includes('429') || msg.includes('quota')) {
+      return "You've reached the request limit. Please wait a moment before trying again.";
+    }
+    if (msg.includes('503') || msg.includes('overloaded')) {
+      return "The AI service is currently experiencing high traffic. Please try again in a few seconds.";
+    }
+    if (msg.includes('safety') || msg.includes('blocked')) {
+      return "The content was flagged by safety filters. Please review your document or text for sensitive content.";
+    }
+    if (msg.includes('json') || msg.includes('parse')) {
+      return "The AI extracted data but it wasn't in the correct format. Try refining your extraction goal to be more specific.";
+    }
+    if (msg.includes('fetch') || msg.includes('network')) {
+      return "Network error. Please check your internet connection.";
+    }
+    
+    return error.message || "An unexpected error occurred. Please try again.";
+  };
+
   const handleProcess = async () => {
     if (!process.env.API_KEY) {
-      alert("Please ensure API_KEY is set in your environment.");
+      setStatus({ isProcessing: false, step: 'error', message: "API Key is missing. Please configure your environment." });
       return;
     }
 
@@ -36,14 +61,17 @@ const App: React.FC = () => {
         // Step 2: Analyze
         const analysisResult = await analyzeExtractedData(data);
         setAnalysis(analysisResult);
+      } else {
+        setStatus({ isProcessing: false, step: 'error', message: "No relevant data found matching your criteria." });
+        return;
       }
 
       setStatus({ isProcessing: false, step: 'complete' });
 
     } catch (error: any) {
-      console.error(error);
-      setStatus({ isProcessing: false, step: 'error', message: error.message || "An unexpected error occurred." });
-      alert(`Error: ${error.message || "Failed to process data."}`);
+      console.error("Processing Error:", error);
+      const friendlyMsg = getFriendlyErrorMessage(error);
+      setStatus({ isProcessing: false, step: 'error', message: friendlyMsg });
     }
   };
 
@@ -73,8 +101,8 @@ const App: React.FC = () => {
       <main className="flex-grow p-6 md:p-12">
         <div className="max-w-7xl mx-auto space-y-12">
           
-          {/* Hero Text (Only show if no results yet) */}
-          {extractedData.length === 0 && !status.isProcessing && (
+          {/* Hero Text (Only show if no results yet and not error) */}
+          {extractedData.length === 0 && !status.isProcessing && status.step !== 'error' && (
             <div className="text-center space-y-4 py-8">
               <h2 className="text-4xl md:text-5xl font-extrabold text-white">
                 Turn Chaos into <span className="text-transparent bg-clip-text bg-gradient-to-r from-blue-400 to-purple-500">Structured Data</span>
@@ -102,6 +130,19 @@ const App: React.FC = () => {
             <div className="flex flex-col items-center justify-center py-12 animate-pulse">
                <div className="h-12 w-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mb-4"></div>
                <p className="text-lg text-blue-400 font-medium">{status.message}</p>
+            </div>
+          )}
+
+          {/* Error State */}
+          {status.step === 'error' && (
+            <div className="w-full max-w-4xl mx-auto bg-red-900/20 border border-red-500/50 rounded-xl p-6 flex items-start gap-4 animate-fade-in shadow-lg">
+              <div className="p-2 bg-red-500/20 rounded-full">
+                <AlertCircle className="text-red-400 h-6 w-6" />
+              </div>
+              <div>
+                <h3 className="text-red-400 font-semibold text-lg mb-1">Extraction Failed</h3>
+                <p className="text-red-200/80 text-sm leading-relaxed">{status.message}</p>
+              </div>
             </div>
           )}
 
