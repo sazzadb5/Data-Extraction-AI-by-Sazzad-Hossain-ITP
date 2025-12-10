@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { Upload, FileText, Image as ImageIcon, X, File as FileIcon } from 'lucide-react';
+import { Upload, FileText, Image as ImageIcon, X, File as FileIcon, FileSpreadsheet, FileJson } from 'lucide-react';
 import { FileData } from '../types';
 
 interface InputSectionProps {
@@ -51,29 +51,33 @@ export const InputSection: React.FC<InputSectionProps> = ({
   };
 
   const processFile = (file: File) => {
-    const validTypes = ['image/png', 'image/jpeg', 'image/webp', 'application/pdf', 'text/plain'];
+    const validTextTypes = ['text/plain', 'text/csv', 'application/json', 'text/markdown'];
+    // RTF is often application/rtf or text/rtf
     
-    if (file.type === "text/plain") {
+    // We can read text files directly into the rawText area for editing if they are small enough (e.g., < 1MB)
+    if (validTextTypes.includes(file.type) && file.size < 1024 * 1024) {
       const reader = new FileReader();
       reader.onload = (e) => {
         setRawText((e.target?.result as string) || "");
+        // Clear any existing fileData since we moved it to text
+        setFileData(null);
       };
       reader.readAsText(file);
-    } else if (validTypes.some(type => file.type.startsWith(type.split('/')[0]) || file.type === type)) {
+    } else {
+      // Treat as binary/large file for Gemini
       const reader = new FileReader();
       reader.onloadend = () => {
         const base64String = reader.result as string;
-        // Remove data URL prefix for API
         const base64Data = base64String.split(',')[1];
         setFileData({
           base64: base64Data,
-          mimeType: file.type,
+          mimeType: file.type || 'application/octet-stream',
           name: file.name
         });
+        // Clear text if we are replacing with a file, or keep it? 
+        // Usually better to let user decide, but here we assume file takes precedence or complements.
       };
       reader.readAsDataURL(file);
-    } else {
-      alert("Supported formats: PDF Documents, Images (PNG, JPG), or Plain Text.");
     }
   };
 
@@ -92,9 +96,12 @@ export const InputSection: React.FC<InputSectionProps> = ({
           />
         ) : (
           <div className="flex flex-col items-center text-slate-300">
-            <FileIcon size={64} className="text-red-400 mb-2" />
+            {fileData.mimeType.includes('pdf') ? <FileIcon size={64} className="text-red-400 mb-2" /> :
+             fileData.mimeType.includes('csv') ? <FileSpreadsheet size={64} className="text-green-400 mb-2" /> :
+             fileData.mimeType.includes('json') ? <FileJson size={64} className="text-yellow-400 mb-2" /> :
+             <FileText size={64} className="text-blue-400 mb-2" />}
             <span className="text-sm font-medium text-center truncate max-w-[200px]">{fileData.name}</span>
-            <span className="text-xs text-slate-500 uppercase mt-1">PDF Document</span>
+            <span className="text-xs text-slate-500 uppercase mt-1">{fileData.mimeType.split('/')[1] || 'Document'}</span>
           </div>
         )}
         
@@ -117,15 +124,18 @@ export const InputSection: React.FC<InputSectionProps> = ({
       {/* Configuration / Prompt */}
       <div>
         <label className="block text-sm font-medium text-slate-300 mb-2">
-          Extraction Goal <span className="text-slate-500">(What do you want to extract?)</span>
+          Extraction Goal & Data References
         </label>
         <input
           type="text"
-          className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition"
-          placeholder="e.g., Extract name, email, and invoice amount from this PDF..."
+          className="w-full bg-slate-900 border border-slate-700 rounded-lg p-3 text-white focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none transition placeholder-slate-500"
+          placeholder="e.g., Extract Invoice Number, Date, and Amount from page 1. Find the code starting with '00'."
           value={instruction}
           onChange={(e) => setInstruction(e.target.value)}
         />
+        <p className="text-xs text-slate-500 mt-1">
+          Tip: Be specific about fields. To preserve "026" as text, mention "keep leading zeros".
+        </p>
       </div>
 
       {/* Input Area */}
@@ -134,11 +144,11 @@ export const InputSection: React.FC<InputSectionProps> = ({
         {/* Text Input */}
         <div className="flex flex-col h-64">
           <label className="block text-sm font-medium text-slate-300 mb-2 flex items-center gap-2">
-            <FileText size={16} /> Paste Text
+            <FileText size={16} /> Paste Text / CSV / JSON
           </label>
           <textarea
             className="flex-1 w-full bg-slate-900 border border-slate-700 rounded-lg p-4 text-slate-300 resize-none focus:ring-2 focus:ring-blue-500 outline-none font-mono text-sm"
-            placeholder="Paste text here or upload a file ->"
+            placeholder="Paste raw text here..."
             value={rawText}
             onChange={(e) => setRawText(e.target.value)}
           />
@@ -147,7 +157,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
         {/* File/Image Upload */}
         <div className="flex flex-col h-64">
           <label className="block text-sm font-medium text-slate-300 mb-2 flex items-center gap-2">
-            <Upload size={16} /> Upload Document / Image
+            <Upload size={16} /> Upload File (PDF, CSV, RTF, Img)
           </label>
           <div
             className={`flex-1 relative flex flex-col items-center justify-center border-2 border-dashed rounded-lg transition-colors cursor-pointer overflow-hidden
@@ -162,7 +172,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
               type="file"
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer z-10"
               onChange={handleFileChange}
-              accept=".pdf,image/png,image/jpeg,image/webp,.txt"
+              accept=".pdf,.csv,.rtf,.txt,.json,.md,image/*"
             />
             
             {fileData ? renderFilePreview() : (
@@ -171,7 +181,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
                   <Upload className="h-8 w-8 text-blue-400" />
                 </div>
                 <p className="text-sm text-slate-300 font-medium">Click to upload or drag & drop</p>
-                <p className="text-xs text-slate-500 mt-2">Supports Large PDF (5K+ pages), PNG, JPG</p>
+                <p className="text-xs text-slate-500 mt-2">PDF (5K+ pages), CSV, RTF, Images</p>
               </div>
             )}
           </div>
@@ -181,15 +191,15 @@ export const InputSection: React.FC<InputSectionProps> = ({
       <div className="flex justify-end pt-2">
         <button
           onClick={onProcess}
-          disabled={isProcessing || (!rawText && !fileData)}
+          disabled={isProcessing}
           className={`
             px-8 py-3 rounded-lg font-semibold text-white shadow-lg transition-all
-            ${isProcessing || (!rawText && !fileData)
+            ${isProcessing
               ? 'bg-slate-700 cursor-not-allowed text-slate-500' 
               : 'bg-blue-600 hover:bg-blue-500 hover:shadow-blue-500/30 active:scale-95'}
           `}
         >
-          {isProcessing ? 'Processing with Gemini 2.5...' : 'Extract Data'}
+          {isProcessing ? 'Analyzing File...' : 'Extract Data'}
         </button>
       </div>
     </div>

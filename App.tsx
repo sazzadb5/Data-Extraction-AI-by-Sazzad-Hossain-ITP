@@ -40,9 +40,25 @@ const App: React.FC = () => {
     return error.message || "An unexpected error occurred. Please try again.";
   };
 
+  const validateInput = (): boolean => {
+    if (!instruction.trim()) {
+      setStatus({ isProcessing: false, step: 'error', message: "Please provide an extraction goal or description of what you want to find." });
+      return false;
+    }
+    if (!rawText.trim() && !fileData) {
+      setStatus({ isProcessing: false, step: 'error', message: "Please upload a file or paste text content to process." });
+      return false;
+    }
+    return true;
+  };
+
   const handleProcess = async () => {
     if (!process.env.API_KEY) {
       setStatus({ isProcessing: false, step: 'error', message: "API Key is missing. Please configure your environment." });
+      return;
+    }
+
+    if (!validateInput()) {
       return;
     }
 
@@ -56,7 +72,7 @@ const App: React.FC = () => {
       setExtractedData(data);
 
       if (data.length > 0) {
-        setStatus({ isProcessing: true, step: 'analyzing', message: 'Analyzing patterns and sentiment...' });
+        setStatus({ isProcessing: true, step: 'analyzing', message: 'Analyzing patterns and heuristic data quality...' });
         
         // Step 2: Analyze
         const analysisResult = await analyzeExtractedData(data);

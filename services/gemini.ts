@@ -21,19 +21,7 @@ export const extractStructuredData = async (
 ): Promise<ExtractedItem[]> => {
   const ai = getAiClient();
 
-  // Dynamic schema for extraction: An array of objects.
-  const responseSchema = {
-    type: Type.ARRAY,
-    items: {
-      type: Type.OBJECT,
-      properties: {
-        // Dynamic properties; relying on prompt instruction to define keys.
-      },
-    },
-  };
-
   // Gemini 2.5 Flash is recommended for high-volume text and multimodal tasks.
-  // It supports a very large context window, enabling entire books or long PDFs to be processed in one go.
   const model = "gemini-2.5-flash"; 
 
   let userContent: any[] = [];
@@ -64,7 +52,13 @@ export const extractStructuredData = async (
       parts: userContent
     },
     config: {
-      systemInstruction: "You are a high-capacity data extraction engine capable of processing large documents. You MUST output a valid JSON Array containing objects. Extract specific fields requested by the user. If data is missing, use null. Do not include markdown code blocks, just raw JSON. If the document is very large, ensure you extract a representative set or all data as requested.",
+      systemInstruction: `You are a high-capacity data extraction engine. 
+      CRITICAL FORMATTING RULES:
+      1. Output MUST be a valid JSON Array.
+      2. PRESERVE LEADING ZEROS exactly as they appear in the source text (e.g., if source has "026", extract it as the string "026", NOT the number 26).
+      3. Treat ID numbers, phone numbers, and codes as STRINGS to maintain formatting.
+      4. Extract specific data fields as requested by the user. If a field is not found, use null.
+      5. Do not include markdown code blocks. Just raw JSON.`,
       responseMimeType: "application/json",
       temperature: 0.1, // Low temperature for factual extraction
     },
@@ -86,7 +80,7 @@ export const extractStructuredData = async (
  */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
-  const dataStr = JSON.stringify(data.slice(0, 100)); // Increased context for analysis
+  const dataStr = JSON.stringify(data.slice(0, 150)); // Increased context
 
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
@@ -99,9 +93,14 @@ export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<Analy
           summary: { type: Type.STRING },
           sentiment: { type: Type.STRING, enum: ['positive', 'neutral', 'negative'] },
           keyEntities: { type: Type.ARRAY, items: { type: Type.STRING } },
-          suggestedActions: { type: Type.ARRAY, items: { type: Type.STRING } }
+          suggestedActions: { type: Type.ARRAY, items: { type: Type.STRING } },
+          heuristicAnalysis: { 
+            type: Type.ARRAY, 
+            items: { type: Type.STRING },
+            description: "Heuristic observations about data quality, patterns, anomalies, or missing information."
+          }
         },
-        required: ["summary", "sentiment", "keyEntities", "suggestedActions"]
+        required: ["summary", "sentiment", "keyEntities", "suggestedActions", "heuristicAnalysis"]
       }
     }
   });

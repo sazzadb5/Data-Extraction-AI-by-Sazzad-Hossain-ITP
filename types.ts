@@ -7,6 +7,7 @@ export interface AnalysisResult {
   sentiment: 'positive' | 'neutral' | 'negative';
   keyEntities: string[];
   suggestedActions: string[];
+  heuristicAnalysis: string[];
 }
 
 export interface ProcessingStatus {

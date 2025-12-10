@@ -21,8 +21,18 @@ export const convertToCSV = (data: ExtractedItem[]): string => {
   const csvRows = [
     headers.join(','), // Header row
     ...data.map(row => headers.map(fieldName => {
-      const val = row[fieldName];
-      const escaped = ('' + (val ?? '')).replace(/"/g, '""');
+      let val = row[fieldName];
+      
+      if (val === null || val === undefined) return '';
+
+      // Check for strings that look like numbers with leading zeros (e.g., "0123")
+      // To preserve this in Excel, we can format it as ="0123"
+      const stringVal = String(val);
+      if (typeof val === 'string' && /^0\d+$/.test(stringVal)) {
+        return `="""${stringVal}"""`; // Excel CSV hack: ="value"
+      }
+
+      const escaped = stringVal.replace(/"/g, '""');
       return `"${escaped}"`;
     }).join(','))
   ];
@@ -37,10 +47,12 @@ export const convertToTSV = (data: ExtractedItem[]): string => {
   const rows = [
     headers.join('\t'),
     ...data.map(row => headers.map(fieldName => {
-      const val = row[fieldName];
-      // Escape tabs and newlines for TSV compatibility
-      const cleanVal = ('' + (val ?? '')).replace(/\t/g, ' ').replace(/[\r\n]+/g, ' ');
-      return cleanVal;
+      let val = row[fieldName];
+      if (val === null || val === undefined) return '';
+      
+      const stringVal = String(val);
+      // Clean tabs and newlines
+      return stringVal.replace(/\t/g, ' ').replace(/[\r\n]+/g, ' ');
     }).join('\t'))
   ];
   return rows.join('\n');

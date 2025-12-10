@@ -1,5 +1,5 @@
 import React, { useMemo, useState } from 'react';
-import { Download, Table, BarChart2, PieChart, Activity, Copy, Check, FileSpreadsheet, FileText } from 'lucide-react';
+import { Download, Table, BarChart2, PieChart, Activity, Copy, Check, FileSpreadsheet, FileText, Lightbulb } from 'lucide-react';
 import { ExtractedItem, AnalysisResult, ExportFormat } from '../types';
 import { handleExport, convertToTSV, copyToClipboard } from '../utils/export';
 import { BarChart, Bar, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from 'recharts';
@@ -74,6 +74,20 @@ export const ResultsView: React.FC<ResultsViewProps> = ({ data, analysis }) => {
                  {analysis.sentiment}
                </span>
             </div>
+            
+            {/* Heuristic Analysis */}
+            {analysis.heuristicAnalysis && analysis.heuristicAnalysis.length > 0 && (
+              <div className="mt-4 pt-4 border-t border-slate-700">
+                 <h4 className="text-sm font-semibold text-yellow-500 mb-2 flex items-center gap-2">
+                   <Lightbulb size={16} /> Heuristic Observations
+                 </h4>
+                 <ul className="space-y-1">
+                   {analysis.heuristicAnalysis.map((item, i) => (
+                     <li key={i} className="text-xs text-slate-400 italic">• {item}</li>
+                   ))}
+                 </ul>
+              </div>
+            )}
           </div>
 
           <div className="bg-slate-800 p-6 rounded-xl border border-slate-700 flex flex-col justify-center">
