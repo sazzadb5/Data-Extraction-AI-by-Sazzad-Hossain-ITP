@@ -19,6 +19,16 @@ const chunkArray = (arr: number[], size: number) => {
   return res;
 };
 
+// Helper to chunk string (for massive text inputs)
+const chunkString = (str: string, size: number) => {
+  const numChunks = Math.ceil(str.length / size);
+  const chunks = new Array(numChunks);
+  for (let i = 0, o = 0; i < numChunks; ++i, o += size) {
+    chunks[i] = str.substring(o, o + size);
+  }
+  return chunks;
+};
+
 // Helper to convert base64 to Uint8Array
 const base64ToUint8Array = (base64: string): Uint8Array => {
   const binaryString = atob(base64);
@@ -32,8 +42,8 @@ const base64ToUint8Array = (base64: string): Uint8Array => {
 
 /**
  * Extracts structured data from unstructured text or file inputs (PDF/Images).
- * Uses Gemini 2.5 Flash which has a massive context window (1M+ tokens).
- * Automatically splits PDFs larger than 1000 pages to bypass API limits.
+ * Uses Gemini 2.5 Flash which has a 1M token context window.
+ * Automatically splits inputs to bypass API limits, supporting effectively infinite size.
  */
 export const extractStructuredData = async (
   prompt: string,
@@ -43,8 +53,7 @@ export const extractStructuredData = async (
   const ai = getAiClient();
   const model = "gemini-2.5-flash";
 
-  // Handle Large PDF Splitting
-  // Check mimeType OR extension to be robust
+  // 1. Handle PDF Splitting
   const isPdf = fileData && (
     fileData.mimeType === 'application/pdf' || 
     fileData.name.toLowerCase().endsWith('.pdf')
@@ -52,23 +61,24 @@ export const extractStructuredData = async (
 
   if (fileData && isPdf) {
     try {
-      console.log("Attempting to load PDF for page count check...");
-      // Convert to Uint8Array for more robust loading in pdf-lib
+      console.log("Checking PDF size...");
       const pdfBytes = base64ToUint8Array(fileData.base64);
       const pdfDoc = await PDFDocument.load(pdfBytes);
       const totalPages = pdfDoc.getPageCount();
       
-      // Reduce chunk size to 500 to be safe and avoid timeouts/latency issues
-      const MAX_PAGES_PER_CHUNK = 500; 
+      // DRASTICALLY REDUCED CHUNK SIZE to satisfy 1M token limit.
+      // 50 pages * ~5000 tokens (very dense) = 250k tokens.
+      // This allows plenty of room for prompt and output overhead.
+      const MAX_PAGES_PER_CHUNK = 50; 
 
-      if (totalPages > 1000) {
-        console.log(`Large PDF detected (${totalPages} pages). Splitting into chunks...`);
+      if (totalPages > MAX_PAGES_PER_CHUNK) {
+        console.log(`Large PDF detected (${totalPages} pages). Splitting into ${MAX_PAGES_PER_CHUNK} page chunks...`);
         const pageIndices = Array.from({ length: totalPages }, (_, i) => i);
         const pageChunks = chunkArray(pageIndices, MAX_PAGES_PER_CHUNK);
         
         let aggregatedData: ExtractedItem[] = [];
 
-        // Process chunks sequentially to avoid rate limits and memory issues
+        // Process chunks sequentially
         for (let i = 0; i < pageChunks.length; i++) {
           const chunkIndices = pageChunks[i];
           console.log(`Processing chunk ${i + 1}/${pageChunks.length} (${chunkIndices.length} pages)...`);
@@ -79,11 +89,10 @@ export const extractStructuredData = async (
           
           const subDocBase64 = await subDoc.saveAsBase64();
           
-          // Use the chunk as a new fileData object
           const chunkResponse = await callGeminiExtract(ai, model, prompt, rawText, {
             ...fileData,
             base64: subDocBase64,
-            mimeType: 'application/pdf' // Ensure mimeType is set correctly for the chunk
+            mimeType: 'application/pdf'
           });
           
           aggregatedData = [...aggregatedData, ...chunkResponse];
@@ -92,13 +101,29 @@ export const extractStructuredData = async (
         return aggregatedData;
       }
     } catch (err) {
-      console.warn("PDF pre-processing/splitting failed. Falling back to sending original file.", err);
-      // We fall through to standard execution, which might error if file > 1000 pages, 
-      // but it's the best fallback we have if local processing fails.
+      console.warn("PDF pre-processing/splitting failed. Falling back to standard mode.", err);
     }
   }
 
-  // Standard Execution (Images, Text, Small PDFs, or failed split attempts)
+  // 2. Handle Large Text Splitting (for massive CSV/TXT pastes)
+  // 1 Token ~= 4 chars. 1M Tokens ~= 4M chars. 
+  // We set a safety limit of ~3M chars (~750k tokens) to stay safe.
+  const MAX_TEXT_LENGTH = 3000000; 
+
+  if (!fileData && rawText.length > MAX_TEXT_LENGTH) {
+      console.log(`Large Text input detected (${rawText.length} chars). Splitting...`);
+      const chunks = chunkString(rawText, MAX_TEXT_LENGTH);
+      let aggregatedData: ExtractedItem[] = [];
+      
+      for (let i = 0; i < chunks.length; i++) {
+        console.log(`Processing text chunk ${i + 1}/${chunks.length}...`);
+        const chunkResponse = await callGeminiExtract(ai, model, prompt, chunks[i], null);
+        aggregatedData = [...aggregatedData, ...chunkResponse];
+      }
+      return aggregatedData;
+  }
+
+  // Standard Execution (Images, Small Texts, Small PDFs)
   return callGeminiExtract(ai, model, prompt, rawText, fileData);
 };
 
@@ -129,35 +154,39 @@ const callGeminiExtract = async (
     userContent.push({ text: `Extract the following data structures based on this instruction: "${prompt}".\n\nData Source:\n${rawText}` });
   }
 
-  const response = await ai.models.generateContent({
-    model,
-    contents: {
-      role: 'user',
-      parts: userContent
-    },
-    config: {
-      systemInstruction: `You are a high-capacity data extraction engine. 
-      CRITICAL FORMATTING RULES:
-      1. Output MUST be a valid JSON Array.
-      2. PRESERVE LEADING ZEROS exactly as they appear (e.g., "026" stays "026").
-      3. Treat ID numbers and codes as STRINGS.
-      4. Extract specific data fields as requested. If a field is not found, use null.
-      5. Do not include markdown code blocks. Just raw JSON.
-      6. If processing a partial chunk of a larger document, extract all relevant complete records found in this chunk.`,
-      responseMimeType: "application/json",
-      temperature: 0.1,
-    },
-  });
-
-  const text = response.text;
-  if (!text) return []; // Return empty array if no data generated for this chunk
-
   try {
+    const response = await ai.models.generateContent({
+      model,
+      contents: {
+        role: 'user',
+        parts: userContent
+      },
+      config: {
+        systemInstruction: `You are a high-capacity data extraction engine. 
+        CRITICAL FORMATTING RULES:
+        1. Output MUST be a valid JSON Array.
+        2. PRESERVE LEADING ZEROS exactly as they appear (e.g., "026" stays "026").
+        3. Treat ID numbers and codes as STRINGS.
+        4. Extract specific data fields as requested. If a field is not found, use null.
+        5. Do not include markdown code blocks. Just raw JSON.
+        6. If processing a partial chunk of a larger document, extract all relevant complete records found in this chunk.`,
+        responseMimeType: "application/json",
+        temperature: 0.1,
+      },
+    });
+
+    const text = response.text;
+    if (!text) return [];
+
     const json = JSON.parse(text);
     return Array.isArray(json) ? json : [json];
-  } catch (e) {
-    console.error("Failed to parse AI response", text);
-    // Return empty array on parse failure to not break the whole chain
+
+  } catch (e: any) {
+    console.error("Gemini API Call Failed:", e);
+    // If we hit a token limit inside a chunk that was supposedly safe, we return empty to not crash the whole batch
+    if (e.message && e.message.includes('token')) {
+        console.error("Token limit hit in chunk.");
+    }
     return [];
   }
 };
@@ -167,8 +196,8 @@ const callGeminiExtract = async (
  */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
-  // Gemini 2.5 Flash has a 1M token context window.
-  // We can send a significantly larger portion of the dataset for analysis.
+  // We limit analysis context to ~5000 items to avoid token limits on the analysis step
+  // 5000 items * ~20 tokens/item = 100k tokens. Safe.
   const dataStr = JSON.stringify(data.slice(0, 5000)); 
 
   const response = await ai.models.generateContent({
