@@ -1,0 +1,5 @@
+{
+  "name": "DataXtract AI",
+  "description": "A lightweight, advanced AI-powered tool to extract structured data from unstructured text or images and export to Excel/CSV/RTF with deep analysis capabilities.",
+  "requestFramePermissions": []
+}
