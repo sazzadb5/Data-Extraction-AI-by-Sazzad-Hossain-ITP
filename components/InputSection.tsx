@@ -54,8 +54,8 @@ export const InputSection: React.FC<InputSectionProps> = ({
     const validTextTypes = ['text/plain', 'text/csv', 'application/json', 'text/markdown'];
     // RTF is often application/rtf or text/rtf
     
-    // We can read text files directly into the rawText area for editing if they are small enough (e.g., < 1MB)
-    if (validTextTypes.includes(file.type) && file.size < 1024 * 1024) {
+    // Check for text files. Increased limit to 10MB to support large (2500+ page) text/csv dumps.
+    if (validTextTypes.includes(file.type) && file.size < 10 * 1024 * 1024) {
       const reader = new FileReader();
       reader.onload = (e) => {
         setRawText((e.target?.result as string) || "");
@@ -64,7 +64,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
       };
       reader.readAsText(file);
     } else {
-      // Treat as binary/large file for Gemini
+      // Treat as binary/large file for Gemini (PDFs, Images, or very large Text files)
       const reader = new FileReader();
       reader.onloadend = () => {
         const base64String = reader.result as string;
@@ -74,8 +74,7 @@ export const InputSection: React.FC<InputSectionProps> = ({
           mimeType: file.type || 'application/octet-stream',
           name: file.name
         });
-        // Clear text if we are replacing with a file, or keep it? 
-        // Usually better to let user decide, but here we assume file takes precedence or complements.
+        // Clear text if we are replacing with a file
       };
       reader.readAsDataURL(file);
     }

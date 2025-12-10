@@ -52,13 +52,14 @@ export const extractStructuredData = async (
       parts: userContent
     },
     config: {
-      systemInstruction: `You are a high-capacity data extraction engine. 
+      systemInstruction: `You are a high-capacity data extraction engine capable of processing thousands of records. 
       CRITICAL FORMATTING RULES:
       1. Output MUST be a valid JSON Array.
       2. PRESERVE LEADING ZEROS exactly as they appear in the source text (e.g., if source has "026", extract it as the string "026", NOT the number 26).
       3. Treat ID numbers, phone numbers, and codes as STRINGS to maintain formatting.
       4. Extract specific data fields as requested by the user. If a field is not found, use null.
-      5. Do not include markdown code blocks. Just raw JSON.`,
+      5. Do not include markdown code blocks. Just raw JSON.
+      6. Be concise to maximize the number of records you can return.`,
       responseMimeType: "application/json",
       temperature: 0.1, // Low temperature for factual extraction
     },
@@ -80,7 +81,10 @@ export const extractStructuredData = async (
  */
 export const analyzeExtractedData = async (data: ExtractedItem[]): Promise<AnalysisResult> => {
   const ai = getAiClient();
-  const dataStr = JSON.stringify(data.slice(0, 150)); // Increased context
+  // Gemini 2.5 Flash has a 1M token context window.
+  // We can send a significantly larger portion of the dataset for analysis.
+  // Increasing slice from 150 to 5000 records to support large "page limit" requests.
+  const dataStr = JSON.stringify(data.slice(0, 5000)); 
 
   const response = await ai.models.generateContent({
     model: "gemini-2.5-flash",
